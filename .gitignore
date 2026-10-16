@@ -1,0 +1,50 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.python-version
+
+# ---- 运行产物（目录保留，内容忽略）----
+temp/*
+!temp/.gitkeep
+output/*
+!output/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# ---- 模型与权重（体积大，不入库）----
+model_weights/*
+!model_weights/.gitkeep
+lora_weights/*
+!lora_weights/.gitkeep
+*.pth
+*.pt
+*.safetensors
+*.ckpt
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ---- 工具缓存 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ---- 临时媒体 ----
+*.log
+*.part
+*.tmp
