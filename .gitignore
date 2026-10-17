@@ -33,6 +33,9 @@ lora_weights/*
 # ---- 运行时下载的工具（如界面里一键下载的 FFmpeg）----
 tools/
 
+# ---- GFPGAN / facexlib 权重（安装脚本下载，体积大）----
+gfpgan/
+
 # ---- 编辑器 / 系统 ----
 .vscode/
 .idea/

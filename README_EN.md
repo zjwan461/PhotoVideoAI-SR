@@ -94,6 +94,7 @@ PhotoVideoAI-SR/
 ├── output/                         # Inference output (batch/ holds batch results)
 ├── lora_weights/                   # LoRA weights *.pth / *.safetensors
 ├── model_weights/                  # Base model weights, e.g. RealESRGAN_x4plus.pth
+├── gfpgan/weights/                 # GFPGAN face detection/parsing models (fetched by the installer)
 ├── tools/                          # Tools downloaded at runtime (FFmpeg from the UI button)
 └── logs/                           # Runtime logs (one timestamped file per launch)
 ```
@@ -220,26 +221,43 @@ python -c "import src.img_sr as m; print(m.HAS_REALESRGAN, m.REALESRGAN_IMPORT_E
 
 ### 6. Install Optional Dependencies (As Needed)
 
+**Both "heavy" optional components (face restore / temporal upscaling) are one command each:**
+
 ```bash
-pip install gfpgan          # Face restoration: the library alone is not enough, you also
-                            # need GFPGANv1.4.pth (~350 MB) in model_weights/, otherwise
-                            # the UI hides the toggle
+python scripts/install.py --gfpgan     # GFPGAN face restore: library + 3 model files (~534 MB total)
+python scripts/install.py --maxine     # Maxine VSR temporal upscaling: nvidia-vfx wheel (~400 MB)
+python scripts/install.py --gfpgan --maxine   # both
+```
+
+`--gfpgan` fetches **three** model files (all of them are required):
+
+| File | Size | Location | Purpose |
+| --- | --- | --- | --- |
+| `GFPGANv1.4.pth` | 332 MB | `model_weights/` | the restoration model itself |
+| `detection_Resnet50_Final.pth` | 104 MB | `gfpgan/weights/` | face detection (RetinaFace) |
+| `parsing_parsenet.pth` | 81 MB | `gfpgan/weights/` | face parsing (mask used when pasting back) |
+
+> The last two belong to facexlib, which **downloads them lazily on first use**. On restricted
+> networks that download stalls on GitHub and looks like "nothing happens — no CPU, no GPU".
+> The installer fetches them up front and pins the directory inside the project (independent of
+> the working directory). Downloads are resumable, and `--gfpgan-url` can point at a mirror.
+
+**Lightweight other optional dependencies:**
+
+```bash
 pip install lpips           # Optional perceptual loss for fine-tuning (downloads VGG
                             # weights, ~500 MB, on first use)
-
-# Maxine VSR temporal upscaling (optional, closed source): the one-click installer is recommended
-python scripts/install.py --maxine
-# Equivalent manual command (the NVIDIA index is mandatory):
-#   pip install nvidia-vfx --index-url https://pypi.nvidia.com
 ```
 
 > **Two gotchas with Maxine**:
 > 1. `nvidia-vfx` on PyPI is only a **3.6 KB placeholder package** — installing it does not
->    give you `nvvfx`. The real wheel (~400 MB, VFX runtime included) is published only on
->    `https://pypi.nvidia.com`.
+>    give you `nvvfx`. The real wheel (~400 MB, with the VFX runtime **and the models** inside)
+>    is published only on `https://pypi.nvidia.com`.
 > 2. It has hardware requirements: an NVIDIA GPU with Tensor Cores (Turing or newer), driver
 >    570.65+ on Windows / 570.190+ on Linux, Python 3.10+.
 >    Once installed, the video Tab gains a `Maxine VSR` option; without it the option is hidden.
+>
+> **Maxine needs no extra model download**: the VSR network (`nvngx_vsr.dll`, 56 MB) ships inside the wheel.
 
 > `safetensors` is a default dependency (it reads third-party `.safetensors` LoRA files),
 > so no extra install is needed. `scikit-image` is **not** a dependency of this project;
@@ -580,6 +598,7 @@ print(runner.status(), runner.result)
 7. **Temporary file cleanup**: each video task only cleans its own subdirectory under `temp/` (concurrent tasks do not affect each other);
    if the process is force-killed, leftovers may remain, and anything older than 24 hours is cleaned automatically on the next start.
 8. **GFPGAN is face-specific**: enabling the toggle on images without faces changes almost nothing and it occupies extra VRAM.
+   It needs 3 model files (`scripts/install.py --gfpgan` fetches all of them), and enabling it does **not** change the output size.
 9. **Compatibility of dependency versions is handled by this project as a fallback**: the pitfall of torchvision ≥ 0.17 removing `transforms.functional_tensor`
    is handled automatically by `src/torchvision_compat.py`; the pitfall of FFmpeg 9 removing `-vsync` is handled automatically by version probing.
    numpy passes the full self-test on both **1.26.4 and 2.4.6** (including real inference and fine-tuning).

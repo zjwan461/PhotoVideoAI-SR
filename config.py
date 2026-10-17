@@ -372,17 +372,62 @@ def gfpgan_weights_path() -> Path:
     return MODEL_DIR / "GFPGANv1.4.pth"
 
 
-def gfpgan_available() -> bool:
-    """检测可选的人脸修复是否**真正可用**：「依赖 + 权重」都要在。
+#: GFPGAN 通过 facexlib 加载人脸检测 / 解析模型的目录。
+#: 用**项目内绝对路径**而不是 facexlib 包目录：``gfpgan/utils.py`` 传给 facexlib 的
+#: ``model_rootpath='gfpgan/weights'`` 是相对路径，facexlib 会按当前工作目录解析，
+#: 从别的目录启动就会重复下载。钉在项目内才与启动目录无关（见 src/gfpgan_compat.py）。
+GFPGAN_WEIGHTS_DIR: Path = PROJECT_ROOT / "gfpgan" / "weights"
 
-    只装了 ``gfpgan`` 库、但没有 ``GFPGANv1.4.pth`` 时返回 False，
-    这样 UI 会直接隐藏该开关，而不是让人点下去才看到「缺少权重」的报错。
+
+#: GFPGAN 还会通过 facexlib 加载人脸**检测 / 解析**模型。
+#: facexlib 在首次使用时才去 GitHub 下载（约 104 MB + 81 MB），
+#: 国内网络下会长时间卡住且看不出原因，因此由安装脚本预先下载。
+GFPGAN_FACEXLIB_MODELS: dict[str, str] = {
+    "detection_Resnet50_Final.pth": (
+        "https://github.com/xinntao/facexlib/releases/download/v0.1.0/"
+        "detection_Resnet50_Final.pth"
+    ),
+    "parsing_parsenet.pth": (
+        "https://github.com/xinntao/facexlib/releases/download/v0.2.2/"
+        "parsing_parsenet.pth"
+    ),
+}
+
+
+def facexlib_weights_dir() -> Path:
+    """GFPGAN / facexlib 人脸检测与解析模型的权重目录（绝对路径）。"""
+    return GFPGAN_WEIGHTS_DIR
+
+
+def missing_facexlib_models() -> list[str]:
+    """返回还缺哪些 facexlib 模型（空列表表示齐全）。"""
+    directory = facexlib_weights_dir()
+    return [name for name in GFPGAN_FACEXLIB_MODELS if not (directory / name).is_file()]
+
+
+def gfpgan_available() -> bool:
+    """检测可选的人脸修复是否**真正可用**：库、GFPGAN 权重、facexlib 模型都要在。
+
+    任何一项缺失都返回 False，这样 UI 会隐藏该开关，而不是让人点下去才报错
+    （facexlib 缺模型时甚至会卡在联网下载上，表现成「没反应」）。
+
+    注意：``gfpgan`` 会连带导入 ``basicsr``，而后者仍在导入 torchvision 已删除的
+    ``transforms.functional_tensor``。这里先装兼容垫片再导入，否则即使库和权重都在，
+    这个开关也永远不出现。
     """
     try:
+        try:
+            from src.torchvision_compat import ensure_functional_tensor
+
+            ensure_functional_tensor()
+        except Exception:  # noqa: BLE001 - 垫片不可用不应影响可用性判断
+            pass
         from gfpgan import GFPGANer  # noqa: F401
     except Exception:
         return False
-    return gfpgan_weights_path().is_file()
+    if not gfpgan_weights_path().is_file():
+        return False
+    return not missing_facexlib_models()
 
 
 def video_model_options() -> list[str]:
@@ -408,8 +453,10 @@ def runtime_summary() -> str:
     lines.append(f"Maxine VSR: {'可用' if maxine_available() else '不可用 (已隐藏)'}")
     if gfpgan_available():
         lines.append("GFPGAN: 可用")
-    elif gfpgan_weights_path().is_file():
-        lines.append("GFPGAN: 不可用 (缺少 gfpgan 依赖，已隐藏)")
-    else:
+    elif not gfpgan_weights_path().is_file():
         lines.append(f"GFPGAN: 不可用 (缺少权重 {gfpgan_weights_path().name}，已隐藏)")
+    elif missing := missing_facexlib_models():
+        lines.append(f"GFPGAN: 不可用 (缺少 facexlib 模型 {'、'.join(missing)}，已隐藏)")
+    else:
+        lines.append("GFPGAN: 不可用 (缺少 gfpgan 依赖，已隐藏)")
     return "\n".join(lines)

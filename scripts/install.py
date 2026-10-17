@@ -18,6 +18,7 @@
     python scripts/install.py --skip-torch    # 已装好 CUDA 版 PyTorch，只补其余依赖
     python scripts/install.py --cpu           # 装 CPU 版 PyTorch（仅用于看界面调试）
     python scripts/install.py --maxine        # 额外安装 Maxine VSR（nvidia-vfx，约 400 MB）
+    python scripts/install.py --gfpgan        # 额外安装 GFPGAN 人脸修复（库 + 约 332 MB 权重）
     python scripts/install.py --dry-run       # 只打印将要执行的命令
 
 脚本是幂等的：已经满足的步骤会跳过，可放心重复运行。
@@ -26,6 +27,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import time
@@ -281,6 +283,198 @@ def install_maxine(args: argparse.Namespace) -> bool:
     return True
 
 
+def download_file(
+    url: str,
+    target: Path,
+    *,
+    timeout: int = 60,
+    min_bytes: int = 1,
+) -> bool:
+    """下载文件到 ``target``：支持断点续传、进度显示与低速放弃。
+
+    只用标准库——这个脚本要在装依赖之前就能跑。
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_file() and target.stat().st_size >= min_bytes:
+        print(f"  已存在，跳过下载：{target.name}（{target.stat().st_size / 1e6:.0f} MB）")
+        return True
+
+    part = target.with_name(target.name + ".part")
+    offset = part.stat().st_size if part.is_file() else 0
+    if offset:
+        print(f"  发现未完成的下载，从 {offset / 1e6:.0f} MB 处续传…")
+
+    request = urllib.request.Request(url, headers={"User-Agent": _UA})
+    if offset:
+        request.add_header("Range", f"bytes={offset}-")
+
+    try:
+        response = urllib.request.urlopen(request, timeout=timeout)  # noqa: S310
+    except urllib.error.HTTPError as exc:
+        if exc.code == 416 and part.is_file():  # 本地已下完，只是没改名
+            part.replace(target)
+            print(f"  ✅ 已下载：{target}")
+            return True
+        print(f"  ❌ 下载失败（HTTP {exc.code}）：{url}")
+        return False
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ❌ 下载失败：{exc}")
+        return False
+
+    with response:
+        status = getattr(response, "status", 200)
+        if offset and status != 206:
+            print("  服务器不支持断点续传，重新下载…")
+            offset = 0
+            part.unlink(missing_ok=True)
+        total = int(response.headers.get("Content-Length") or 0) + offset
+        received = offset
+        started = time.time()
+        with open(part, "ab" if offset else "wb") as handle:
+            while True:
+                chunk = response.read(1024 * 512)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                received += len(chunk)
+                elapsed = max(time.time() - started, 1e-6)
+                if total:
+                    print(
+                        f"\r  下载中 {received / 1e6:7.1f} / {total / 1e6:.1f} MB"
+                        f"（{(received - offset) / elapsed / 1e6:.1f} MB/s）",
+                        end="",
+                        flush=True,
+                    )
+                if elapsed > 30 and (received - offset) / elapsed < 64 * 1024:
+                    print("\n  ❌ 速度过低（持续 30 秒低于 64 KB/s），已放弃。")
+                    return False
+    print()
+
+    if total and received < total:
+        print(
+            f"  ⚠️ 下载不完整（{received / 1e6:.1f}/{total / 1e6:.1f} MB），"
+            f"已保留 {part.name} 供下次续传。"
+        )
+        return False
+    if received < min_bytes:
+        print(f"  ❌ 文件过小（{received} 字节），可能地址失效。")
+        return False
+    part.replace(target)
+    print(f"  ✅ 已下载：{target}（{received / 1e6:.0f} MB）")
+    return True
+
+
+def gfpgan_weights_path() -> Path:
+    """向项目要 GFPGAN 权重的规范路径（尊重 PVSR_MODEL_DIR 覆盖）。"""
+    ok, output = python_check("import config; print(config.gfpgan_weights_path())")
+    if ok and output.strip():
+        return Path(output.strip().splitlines()[-1])
+    return PROJECT_ROOT / "model_weights" / GFPGAN_WEIGHTS_NAME
+
+
+def install_gfpgan(args: argparse.Namespace) -> bool:
+    """安装 GFPGAN 人脸修复：Python 库 + 权重文件（权重约 332 MB）。
+
+    注意 ``gfpgan 1.3.8`` 的元数据同样声明了 ``tb-nightly``（PyPI 上已不存在），
+    所以库要用 ``--no-deps`` 安装；它的运行时依赖已由 basicsr 那一步装齐。
+    """
+    section("安装 GFPGAN 人脸修复（可选）")
+
+    weights = gfpgan_weights_path()
+    weights_ok = weights.is_file() and weights.stat().st_size > 100 * 1024 * 1024
+    # 裸 `import gfpgan` 会连 basicsr 一起踩 torchvision 已删除子模块的坑，
+    # 所以和项目运行时保持一致：先装兼容垫片再导入。
+    lib_ok, _ = python_check(
+        "from src.torchvision_compat import ensure_functional_tensor;"
+        "ensure_functional_tensor();"
+        "from gfpgan import GFPGANer;"
+        "print('ok')"
+    )
+
+    if lib_ok and weights_ok:
+        print("  ✅ gfpgan 库与权重都已就绪，跳过。")
+        return True
+
+    if not lib_ok:
+        print("  说明：gfpgan 1.3.8 声明了已下线的 tb-nightly，需用 --no-deps 安装；")
+        print("        它的运行时依赖（basicsr / facexlib / lmdb / scipy 等）前面已装好。")
+        index = PYPI_CN if args.mirror == "cn" else None
+        if pip_install(["--no-deps", "gfpgan==1.3.8"], index=index, dry_run=args.dry_run) != 0:
+            print("  ❌ gfpgan 库安装失败。")
+            return False
+
+    if not weights_ok:
+        url = args.gfpgan_url or GFPGAN_WEIGHTS_URL
+        print(f"  下载权重 {GFPGAN_WEIGHTS_NAME}（约 332 MB）→ {weights}")
+        print(f"  来源：{url}")
+        if args.dry_run:
+            print(f"  $ （dry-run）下载 {url}")
+        elif not download_file(url, weights, min_bytes=100 * 1024 * 1024):
+            print("  ❌ 权重下载失败。可手动下载后放到：")
+            print(f"     {weights}")
+            print(f"     地址：{url}")
+            return False
+
+    # GFPGAN 还会经 facexlib 加载人脸检测/解析模型；缺它们时首次点击会**静默联网**
+    # 长时间无响应（GPU 也不会有占用），所以这里一并下载好。
+    ok, output = python_check(
+        "import config, json;"
+        "print(json.dumps({"
+        "'dir': str(config.facexlib_weights_dir() or ''),"
+        "'models': config.GFPGAN_FACEXLIB_MODELS,"
+        "'missing': config.missing_facexlib_models()}))"
+    )
+    if not ok:
+        print("  ❌ 无法读取 facexlib 模型清单：")
+        print("\n".join(f"     {line}" for line in output.splitlines()[:4]))
+        return False
+    facexlib_info = json.loads(output.strip().splitlines()[-1])
+    facexlib_dir = Path(facexlib_info["dir"]) if facexlib_info["dir"] else None
+    if facexlib_dir is None:
+        print("  ❌ 未找到 facexlib（它是 gfpgan 的依赖），请先完成前面的安装步骤。")
+        return False
+
+    pending = dict.fromkeys(facexlib_info["missing"], True)
+    if pending:
+        print(f"  下载 facexlib 人脸检测/解析模型（{len(pending)} 个，共约 185 MB）")
+        print(f"  目标目录：{facexlib_dir}")
+    for name in pending:
+        url = facexlib_info["models"].get(name, "")
+        if not url:
+            print(f"  ⚠️ {name} 没有已知下载地址，请手动放入 {facexlib_dir}")
+            return False
+        if args.dry_run:
+            print(f"  $ （dry-run）下载 {url}")
+            continue
+        print(f"  → {name}")
+        if not download_file(url, facexlib_dir / name, min_bytes=20 * 1024 * 1024):
+            print(f"  ❌ {name} 下载失败。可手动下载后放到：{facexlib_dir}")
+            print(f"     地址：{url}")
+            return False
+
+    if args.dry_run:
+        return True
+
+    # 真验证一次：权重能被 torch 读出来，且 config 判定为可用
+    ok, output = python_check(
+        "import config;"
+        "p = config.gfpgan_weights_path();"
+        "print('path=', p);"
+        "print('size_mb=', round(p.stat().st_size / 1e6, 1));"
+        "import torch;"
+        "d = torch.load(str(p), map_location='cpu', weights_only=False);"
+        "print('keys=', list(d)[:3] if isinstance(d, dict) else type(d).__name__);"
+        "print('gfpgan_available=', config.gfpgan_available())"
+    )
+    if not ok or "gfpgan_available= True" not in output:
+        print("  ❌ 安装后仍不可用：")
+        print("\n".join(f"     {line}" for line in output.splitlines()[:8]))
+        return False
+    print("\n".join(f"  {line}" for line in output.splitlines()))
+    print("  ✅ 人脸修复已可用（图片 Tab 会出现「人脸修复 (GFPGAN)」开关）")
+    return True
+
+
 def verify(args: argparse.Namespace) -> bool:
     section("验证安装结果")
     if args.dry_run:
@@ -314,7 +508,7 @@ def verify(args: argparse.Namespace) -> bool:
     return True
 
 
-def next_steps(*, maxine: bool = False) -> None:
+def next_steps(*, maxine: bool = False, gfpgan: bool = False) -> None:
     section("下一步")
     print("  1) 放置基础模型（或让程序首次推理时自动下载）：")
     print(f"     {PROJECT_ROOT / 'model_weights' / 'RealESRGAN_x4plus.pth'}")
@@ -326,6 +520,9 @@ def next_steps(*, maxine: bool = False) -> None:
     if not maxine:
         print("  4) 想用 Maxine VSR 时序超分，再执行：")
         print(f"     {sys.executable} scripts/install.py --maxine")
+    if not gfpgan:
+        print("  5) 想用 GFPGAN 老照片人脸修复，再执行：")
+        print(f"     {sys.executable} scripts/install.py --gfpgan")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -345,6 +542,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="额外安装 NVIDIA Maxine VSR（nvidia-vfx，约 400 MB，可选）")
     parser.add_argument("--maxine-index", default=None,
                         help=f"nvidia-vfx 的索引地址（默认 {MAXINE_INDEX}）")
+    parser.add_argument("--gfpgan", action="store_true",
+                        help="额外安装 GFPGAN 人脸修复（库 + 约 332 MB 权重，可选）")
+    parser.add_argument("--gfpgan-url", default=None,
+                        help=f"GFPGAN 权重下载地址（默认官方 GitHub Releases）")
     parser.add_argument("--dry-run", action="store_true", help="只打印命令，不执行")
     return parser.parse_args(argv)
 
@@ -375,10 +576,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.maxine:
         if not install_maxine(args):
             return 1
+    if args.gfpgan:
+        if not install_gfpgan(args):
+            return 1
     if not verify(args):
         return 1
 
-    next_steps(maxine=args.maxine)
+    next_steps(maxine=args.maxine, gfpgan=args.gfpgan)
     print("\n完成。")
     return 0
 

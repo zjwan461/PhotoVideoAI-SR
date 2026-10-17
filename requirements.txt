@@ -14,15 +14,15 @@ tqdm>=4.66
 safetensors>=0.4.0       # read .safetensors LoRA files (export is always .pth)
 
 # Optional extras - uncomment what you need.
-# gfpgan>=1.3.8          # face restore; the library alone is not enough, it also
-#                        # needs GFPGANv1.4.pth (~350 MB) in model_weights/
 # lpips>=0.1.4           # perceptual loss for LoRA fine-tuning; downloads VGG
 #                        # weights (~500 MB) on first use, falls back to plain L1
 #
-# Maxine VSR is installed by the project's installer, not from here:
-#     python scripts/install.py --maxine
-# (nvidia-vfx on PyPI is only a 3.6 KB placeholder; the real ~400 MB wheel lives on
-#  https://pypi.nvidia.com and needs a Tensor Core GPU + driver 570.65+.)
+# GFPGAN (face restore) and Maxine VSR are installed by the project's installer,
+# not from here - both need more than a plain pip install:
+#     python scripts/install.py --gfpgan    # library + 332 MB weights
+#     python scripts/install.py --maxine    # nvidia-vfx from https://pypi.nvidia.com
+# (gfpgan 1.3.8 declares the discontinued tb-nightly; nvidia-vfx on PyPI is only a
+#  3.6 KB placeholder.)
 #
 # Note: scikit-image is NOT a dependency of this project. It comes with basicsr,
 # which is installed separately in step 4.3 of the README.

@@ -87,6 +87,20 @@ def _make_photo(width: int = 320, height: int = 240):
     return image
 
 
+def _face_image():
+    """取一张真实人脸图（scikit-image 自带的 NASA 宇航员照，公有领域）。
+
+    没有 scikit-image 时退回合成图——GFPGAN 检测不到人脸会原样返回，
+    仍然能验证「模型能加载、调用链不报错、尺寸不变」。
+    """
+    try:
+        from skimage.data import astronaut
+
+        return astronaut()
+    except Exception:  # noqa: BLE001
+        return _make_photo(256, 256)
+
+
 def _make_hr_dataset(directory: Path, count: int = 6, size: int = 192) -> None:
     """合成 HR 训练数据（有结构 + 有细节）。"""
     import cv2
@@ -144,6 +158,25 @@ def test_image(device: str) -> None:
     check("设备参数已归一化", info["device"] == config.normalize_device(device),
           f"info.device={info['device']!r}")
     check("耗时在合理范围", 0 < elapsed < 120, f"{elapsed:.2f}s")
+
+    # GFPGAN 人脸修复（可选组件）：装了才测
+    if not config.gfpgan_available():
+        skip("GFPGAN 人脸修复", "未安装（python scripts/install.py --gfpgan）")
+        return
+    face = _face_image()
+    try:
+        restored, info2 = img_sr.upscale_image(
+            face, device=device, half=True, outscale=4.0,
+            face_restore=True, auto_download=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        check("GFPGAN 人脸修复链路可用", False, str(exc)[:120])
+        return
+    expected = (face.shape[0] * 4, face.shape[1] * 4)
+    check("GFPGAN 人脸修复链路可用", True, f"{face.shape[1]}x{face.shape[0]} 输入")
+    check("开启人脸修复不会改变输出尺寸",
+          restored.shape[:2] == expected,
+          f"实际 {restored.shape[1]}x{restored.shape[0]}，期望 {expected[1]}x{expected[0]}")
 
 
 # --------------------------------------------------------------------------- #

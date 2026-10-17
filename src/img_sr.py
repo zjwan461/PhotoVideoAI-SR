@@ -685,7 +685,13 @@ def get_engine() -> RealESRGANEngine:
 class FaceRestorer:
     """GFPGAN 封装（可选依赖，缺库时 UI 会自动隐藏开关）。"""
 
-    def __init__(self, device: str = "cuda:0", upscale: int = 2):
+    def __init__(self, device: str = "cuda:0", upscale: int = 1):
+        """构造人脸修复器。
+
+        Args:
+            upscale: GFPGAN 的整图放大倍数。这里默认 **1**：输入图已经是被超分过的
+                结果，再放大一倍会让最终输出尺寸翻倍（开启人脸修复就变大，属于 bug）。
+        """
         device = config.normalize_device(device)
         try:
             from gfpgan import GFPGANer
@@ -697,8 +703,24 @@ class FaceRestorer:
         weights = config.gfpgan_weights_path()
         if not weights.is_file():
             raise ImageSRError(
-                f"缺少人脸修复权重：{weights}\n下载地址：{config.GFPGAN_MODEL_URL}"
+                f"缺少人脸修复权重：{weights}\n下载地址：{config.GFPGAN_MODEL_URL}\n"
+                "或直接执行：python scripts/install.py --gfpgan"
             )
+        # facexlib 缺模型时 GFPGANer 会**静默联网下载**（国内网络下表现为长时间没反应），
+        # 这里提前拦下来并给出明确指引。
+        missing = config.missing_facexlib_models()
+        if missing:
+            directory = config.facexlib_weights_dir()
+            raise ImageSRError(
+                "GFPGAN 还需要 facexlib 的人脸检测/解析模型，当前缺失：\n  "
+                + "\n  ".join(missing)
+                + f"\n目标目录：{directory}\n"
+                "执行 python scripts/install.py --gfpgan 可自动补齐。"
+            )
+        # 把 facexlib 的相对权重路径钉到上面这个目录（与启动目录无关）
+        from src import gfpgan_compat
+
+        gfpgan_compat.pin_weights_dir()
         self.upscale = upscale
         self.restorer = GFPGANer(
             model_path=str(weights),
@@ -725,7 +747,16 @@ class FaceRestorer:
             raise ImageSRError(f"人脸修复失败：{exc}") from exc
         if restored_img is None:
             return image_rgb
-        return bgr_to_rgb(restored_img)
+        restored = bgr_to_rgb(restored_img)
+        # 契约：restore() 必须返回与原图同尺寸的图。GFPGAN 的 upscale 若不为 1
+        # （或不同版本行为有差异），这里统一缩回原尺寸，避免输出尺寸莫名变大。
+        if restored.shape[:2] != image_rgb.shape[:2]:
+            restored = cv2.resize(
+                restored,
+                (image_rgb.shape[1], image_rgb.shape[0]),
+                interpolation=cv2.INTER_LANCZOS4,
+            )
+        return restored
 
 
 # --------------------------------------------------------------------------- #

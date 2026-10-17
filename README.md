@@ -94,6 +94,7 @@ PhotoVideoAI-SR/
 ├── output/                         # 推理输出（batch/ 存放批量结果）
 ├── lora_weights/                   # LoRA 权重 *.pth / *.safetensors
 ├── model_weights/                  # 基础模型权重，如 RealESRGAN_x4plus.pth
+├── gfpgan/weights/                 # GFPGAN 的人脸检测/解析模型（安装脚本下载）
 ├── tools/                          # 运行时下载的工具（界面里一键装的 FFmpeg）
 └── logs/                           # 运行日志（每次启动一个带时间戳的文件）
 ```
@@ -120,7 +121,8 @@ PhotoVideoAI-SR/
 
 * `nvvfx`（NVIDIA Maxine VSR）：时序视频超分。未安装时 UI 自动隐藏该选项，主流程不受影响。
   用 `python scripts/install.py --maxine` 一键安装（见下节第 6 步）。
-* `gfpgan`：老照片人脸修复。未安装时对应开关隐藏，需要额外的 `GFPGANv1.4.pth` 权重。
+* `gfpgan`：老照片人脸修复。未安装时对应开关隐藏；用
+  `python scripts/install.py --gfpgan` 一条命令装库 + 下载权重。
 
 > Windows 与 Linux 均可运行；Windows 用户请确认 `ffmpeg.exe` / `ffprobe.exe` 在 PATH 中。
 
@@ -218,23 +220,43 @@ python -c "import src.img_sr as m; print(m.HAS_REALESRGAN, m.REALESRGAN_IMPORT_E
 
 ### 6. 安装可选依赖（按需）
 
-```bash
-pip install gfpgan          # 人脸修复：光装库还不够，必须同时把 GFPGANv1.4.pth
-                            # （约 350 MB）放进 model_weights/，否则 UI 不会显示开关
-pip install lpips           # 微调可选感知损失（首次使用会下载 VGG 权重约 500 MB）
+**两个「重」可选组件（人脸修复 / 时序超分）都用安装脚本，一条命令搞定：**
 
-# Maxine VSR 时序超分（可选，闭源）：推荐用一键安装脚本
-python scripts/install.py --maxine
-# 等价的手动命令（注意必须用 NVIDIA 的索引）：
-#   pip install nvidia-vfx --index-url https://pypi.nvidia.com
+```bash
+python scripts/install.py --gfpgan     # GFPGAN 人脸修复：库 + 3 个模型文件（共约 534 MB）
+python scripts/install.py --maxine     # Maxine VSR 时序超分：nvidia-vfx wheel（约 400 MB）
+python scripts/install.py --gfpgan --maxine   # 两个都要
+```
+
+`--gfpgan` 一次装齐**三个**模型文件（少一个都不行）：
+
+| 文件 | 大小 | 位置 | 用途 |
+| --- | --- | --- | --- |
+| `GFPGANv1.4.pth` | 332 MB | `model_weights/` | 人脸修复主模型 |
+| `detection_Resnet50_Final.pth` | 104 MB | `gfpgan/weights/` | 人脸检测（RetinaFace） |
+| `parsing_parsenet.pth` | 81 MB | `gfpgan/weights/` | 人脸解析（贴回时用的掩膜） |
+
+> 后两个是 facexlib 的模型：**facexlib 默认在首次使用时才联网下载**，国内网络下会卡在
+> GitHub 上，表现为「点了没反应、CPU/GPU 都不动」。安装脚本会预先下好，
+> 并把路径锚定到项目内（与启动目录无关）。下载支持断点续传，可用 `--gfpgan-url` 换源。
+
+脚本同时处理了各个坑：`gfpgan 1.3.8` 的元数据声明了已下线的 `tb-nightly`（所以用
+`--no-deps` 装库，依赖由前面的 basicsr 步骤装齐）；Maxine 必须走 NVIDIA 自己的索引。
+
+**轻量的其它可选依赖：**
+
+```bash
+pip install lpips           # 微调可选感知损失（首次使用会下载 VGG 权重约 500 MB）
 ```
 
 > **Maxine 的两个坑**：
 > 1. PyPI 上的 `nvidia-vfx` 只是一个 **3.6 KB 的占位包**，装它得不到 `nvvfx`；
->    真正的 wheel（约 400 MB，含 VFX 运行时）只发布在 `https://pypi.nvidia.com`。
+>    真正的 wheel（约 400 MB，含 VFX 运行时**和模型**）只发布在 `https://pypi.nvidia.com`。
 > 2. 对硬件有要求：带 Tensor Core 的 NVIDIA 显卡（Turing 及以上）、
 >    Windows 驱动 570.65+ / Linux 570.190+，Python 3.10+。
 >    装好后视频 Tab 会多出 `Maxine VSR` 选项，缺失时自动隐藏。
+>
+> **Maxine 不需要额外下载模型**：VSR 网络（`nvngx_vsr.dll`，56 MB）就打包在 wheel 里。
 
 > `safetensors` 已列为默认依赖（用于读取第三方 `.safetensors` LoRA），无需额外安装。
 > `scikit-image` **不是**本项目的依赖，它随 basicsr 一起装（见第 4.3 步）。
@@ -260,6 +282,9 @@ python scripts/install.py --maxine
 | `RealESRGAN_x4plus_anime_6B.pth` | 动漫插画向 4 倍（更小更快） | https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth |
 | `RealESRGAN_x2plus.pth` | 通用 2 倍 | https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth |
 | `GFPGANv1.4.pth`（可选） | 人脸修复权重 | https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth |
+
+> `GFPGANv1.4.pth` 不用手动下：`python scripts/install.py --gfpgan` 会连库一起装好并放到
+> `model_weights/`（支持断点续传）。上表仍列出地址，方便内网环境用 `--gfpgan-url` 换源。
 
 > **国内网络提示**：这些文件托管在 GitHub Releases，直连常只有几十 KB/s
 >（默认模型约 64 MB）。若长时间无进展，可用代理下载后手工放到 `model_weights/`：
@@ -565,6 +590,7 @@ print(runner.status(), runner.result)
 7. **临时文件清理**：每个视频任务只清理自己在 `temp/` 下的子目录（并发任务互不影响）；
    进程被强杀时可能残留，下次启动会自动清理超过 24 小时的内容。
 8. **GFPGAN 为人脸专用**：非人脸图片开启该开关基本无变化，且会额外占用显存。
+   它需要 3 个模型文件（`scripts/install.py --gfpgan` 一次装齐）；开启后**不会改变输出尺寸**。
 9. **依赖版本的兼容性由本项目兜底**：torchvision ≥ 0.17 删除 `transforms.functional_tensor`
    的坑由 `src/torchvision_compat.py` 自动兼容；FFmpeg 9 移除 `-vsync` 的坑由版本探测自动处理。
    numpy 在 **1.26.4 与 2.4.6** 上均通过完整自测（含真实推理与微调）。
