@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import config
-from src import ffmpeg_utils, img_sr
+from src import ffmpeg_utils, img_sr, task_control
 from src.common import (
     clear_cuda_cache,
     get_logger,
@@ -60,6 +60,7 @@ def upscale_video(
     crf: int | None = None,
     keep_audio: bool = True,
     progress: Callable[[float, str], None] | None = None,
+    should_cancel: Callable[[], None] | None = None,
 ) -> tuple[Path, dict]:
     """对视频做 RealESRGAN 逐帧超分。
 
@@ -67,6 +68,8 @@ def upscale_video(
         preview_only: 只渲染前 ``preview_frames`` 帧，快速看效果（P1）。
         fps_override: 覆盖输出帧率（None 表示沿用源帧率）。
         bitrate_mbps: 目标码率；None 时使用 CRF/CQ 质量控制。
+        should_cancel: 可选的取消检查回调，**每帧之前**调用一次；
+            被取消时应抛出 ``TaskCancelled``，此时 ``finally`` 会清理临时目录。
 
     Returns:
         ``(输出视频路径, 信息字典)``
@@ -116,6 +119,8 @@ def upscale_video(
 
         # ---------- 4. 拆帧 ----------
         _emit(progress, 0.10, "拆分视频帧…")
+        if should_cancel is not None:
+            should_cancel()
         frames = ffmpeg_utils.extract_frames(
             source,
             frames_dir,
@@ -128,11 +133,22 @@ def upscale_video(
         # ---------- 5. 逐帧超分 ----------
         processed = 0
         for index, frame_path in enumerate(frames, start=1):
+            # 每帧之前检查一次，并把检查传给引擎：后者会在块级 forward 前钩子里
+            # 再检查几十次，所以长视频的取消不必等整帧跑完。
+            if should_cancel is not None:
+                should_cancel()
             try:
                 frame = img_sr.read_image(frame_path)
-                result = engine.upscale(frame, outscale=outscale, target_long_edge=target_long_edge)
+                result = engine.upscale(
+                    frame,
+                    outscale=outscale,
+                    target_long_edge=target_long_edge,
+                    should_cancel=should_cancel,
+                )
                 img_sr.write_image(out_frames_dir / frame_path.name.replace(".jpg", ".png"), result)
                 processed += 1
+            except task_control.TaskCancelled:
+                raise
             except img_sr.ImageSRError as exc:
                 # 单帧失败不中断整片，用原帧顶替，保证时长一致
                 logger.warning("第 %d 帧处理失败，使用原帧代替：%s", index, exc)

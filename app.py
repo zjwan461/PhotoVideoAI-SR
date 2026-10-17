@@ -31,15 +31,19 @@ from src import (  # noqa: E402
     ffmpeg_installer,
     ffmpeg_utils,
     img_sr,
+    task_control,
 )
 from src import video_sr_maxine as maxine_mod  # noqa: E402
 from src import video_sr_realesrgan as rr_mod  # noqa: E402
 from src.common import (  # noqa: E402
     check_vram_for_task,
     cleanup_stale_temp,
+    clear_cuda_cache,
     friendly_cuda_error,
     get_device_summary,
+    get_free_vram_gb,
     get_logger,
+    get_total_vram_gb,
     list_image_files,
     log_exception,
     log_runtime_environment,
@@ -96,6 +100,10 @@ def safe_handler(task_name: str):
                 return func(*args, **kwargs)
             except gr.Error:
                 raise
+            except task_control.TaskCancelled as exc:
+                # 取消不是错误：记一条 info 就好，不要当异常打整栈
+                logger.info("%s：%s", task_name, exc)
+                raise gr.Error(str(exc)) from None
             except (
                 img_sr.ImageSRError,
                 rr_mod.VideoSRError,
@@ -172,6 +180,77 @@ def lora_markdown() -> str:
 def refresh_lora_choices():
     """刷新各 Tab 的 LoRA 下拉框选项。"""
     return gr.update(choices=lora_choices(), value=NO_LORA)
+
+
+@safe_handler("释放显存")
+def handle_release_vram():
+    """卸载已加载的模型并回收 CUDA 缓存，把显存还给系统。
+
+    用于 OOM 之后的自救：不必重启程序，卸载后下一次任务会按需重新加载模型（约 1 秒）。
+    有任务在跑时**拒绝执行**，否则会把正在推理的模型从脚下抽走。
+    """
+    running = task_control.active_labels()
+    if running:
+        return (
+            f"⚠️ 有任务正在运行（{'、'.join(running)}），"
+            "请先取消或等它结束再释放显存——否则会中断正在进行的推理。"
+        )
+
+    engine = img_sr.get_engine()
+    index = config.gpu_index_from_option(engine.device or "cuda:0")
+    total = get_total_vram_gb(index)
+    before = get_free_vram_gb(index)
+    was_loaded = engine.ready
+    model_name = engine.model_name
+    lora_name = Path(engine.lora_name).name if engine.lora_name else None
+
+    if was_loaded:
+        # unload() 内部已做 del + gc.collect() + torch.cuda.empty_cache()
+        engine.unload()
+    else:
+        clear_cuda_cache()
+
+    after = get_free_vram_gb(index)
+    logger.info("释放显存：cuda:%d 空闲 %s -> %s GB", index, before, after)
+
+    rows: list[tuple[str, str]] = []
+    if was_loaded:
+        rows.append(("卸载的模型", f"`{model_name}`"))
+        if lora_name:
+            rows.append(("同时卸载的 LoRA", f"`{lora_name}`"))
+    else:
+        rows.append(("卸载的模型", "无（此前未加载模型，仅回收缓存）"))
+    rows.append(("设备", f"cuda:{index}" + (f"（共 {total} GB）" if total else "")))
+    if before is not None and after is not None:
+        rows.append(("空闲显存", f"{before:.2f} GB → **{after:.2f} GB**"))
+    else:
+        rows.append(("空闲显存", "无法读取（当前环境没有可用 CUDA）"))
+
+    body = "\n".join(f"| {key} | {value} |" for key, value in rows)
+    return (
+        "### 🧹 显存已释放\n\n"
+        "| 项目 | 值 |\n| --- | --- |\n"
+        + body
+        + "\n\n下次任务会按需重新加载模型（约 1 秒），不需要重启程序。"
+    )
+
+
+@safe_handler("取消任务")
+def handle_cancel_task():
+    """取消所有运行中的任务（图片 / 批量 / 视频）。
+
+    只是给任务打上取消标记：长任务在下一个自然边界（当前图片 / 当前帧）停下，
+    因此这里返回的是一句「已发送请求」，而不是「已停止」。
+    """
+    labels = task_control.active_labels()
+    cancelled = task_control.cancel_all()
+    if cancelled == 0:
+        return "ℹ️ 当前没有运行中的任务。"
+    return (
+        f"⏹ 已向 {cancelled} 个任务发送取消请求：{'、'.join(labels)}\n\n"
+        "正在跑的任务会在当前推理阶段结束后立即停止（通常 1 秒内），临时文件会被正常清理；"
+        "模型加载中也能取消。"
+    )
 
 
 @safe_handler("下载 FFmpeg")
@@ -260,19 +339,22 @@ def handle_image(
     except enhance_extras.ExtrasError as exc:
         raise gr.Error(str(exc)) from None
 
-    result, info = img_sr.upscale_image(
-        prepared,
-        preset_name=preset_name,
-        device=device,
-        model_name=model_name,
-        lora_selection=lora_selection,
-        half=bool(half_precision),
-        outscale=float(outscale),
-        tile=int(tile_size) or None,
-        auto_download=bool(auto_download),
-        face_restore=bool(face_restore),
-        progress=lambda value, text: progress(value, desc=text),
-    )
+    # 包住真正的重活：界面的「取消任务」按钮通过这个令牌协作取消
+    with task_control.task_scope("图片超分") as token:
+        result, info = img_sr.upscale_image(
+            prepared,
+            preset_name=preset_name,
+            device=device,
+            model_name=model_name,
+            lora_selection=lora_selection,
+            half=bool(half_precision),
+            outscale=float(outscale),
+            tile=int(tile_size) or None,
+            auto_download=bool(auto_download),
+            face_restore=bool(face_restore),
+            progress=lambda value, text: progress(value, desc=text),
+            should_cancel=token.raise_if_cancelled,
+        )
 
     # 上色属于「输出侧」，放在超分之后
     if colorize_enabled:
@@ -333,17 +415,23 @@ def handle_image_batch(
     failures: list[str] = []
     started = time.time()
 
-    for index, path in enumerate(inputs, start=1):
-        progress((index - 1) / len(inputs), desc=f"[{index}/{len(inputs)}] {Path(path).name}")
-        try:
-            target, _info = _upscale_single_to_dir(
-                Path(path), output_dir, preset_name, device, model_name,
-                lora_selection, half_precision, outscale, tile_size, auto_download, image_format,
-            )
-            outputs.append(str(target))
-        except Exception as exc:  # noqa: BLE001
-            log_exception(f"批量图片超分 {Path(path).name}", exc)
-            failures.append(f"{Path(path).name}: {exc}")
+    with task_control.task_scope("批量图片超分") as token:
+        for index, path in enumerate(inputs, start=1):
+            # 放在 try 之外：取消不能被「单图失败」的分支吞掉
+            token.raise_if_cancelled()
+            progress((index - 1) / len(inputs), desc=f"[{index}/{len(inputs)}] {Path(path).name}")
+            try:
+                target, _info = _upscale_single_to_dir(
+                    Path(path), output_dir, preset_name, device, model_name,
+                    lora_selection, half_precision, outscale, tile_size, auto_download, image_format,
+                    should_cancel=token.raise_if_cancelled,
+                )
+                outputs.append(str(target))
+            except task_control.TaskCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log_exception(f"批量图片超分 {Path(path).name}", exc)
+                failures.append(f"{Path(path).name}: {exc}")
 
     progress(1.0, desc="批量完成")
     elapsed = time.time() - started
@@ -361,6 +449,7 @@ def handle_image_batch(
 def _upscale_single_to_dir(
     input_path: Path, output_dir: Path, preset_name, device, model_name,
     lora_selection, half_precision, outscale, tile_size, auto_download, image_format,
+    should_cancel=None,
 ) -> tuple[Path, dict]:
     """单图超分并把结果写入指定目录。"""
     image = img_sr.read_image(input_path)
@@ -374,6 +463,7 @@ def _upscale_single_to_dir(
         outscale=float(outscale),
         tile=int(tile_size) or None,
         auto_download=bool(auto_download),
+        should_cancel=should_cancel,
     )
     suffix = ".jpg" if str(image_format).upper() == "JPG" else ".png"
     target = output_dir / f"{input_path.stem}_sr{suffix}"
@@ -443,21 +533,23 @@ def handle_video(
         progress=lambda value, text: progress(value, desc=text),
     )
 
-    if use_maxine:
-        target, info = maxine_mod.upscale_video_maxine(video_path, **common_kwargs)
-        task_label = "Maxine 视频超分"
-    else:
-        target, info = rr_mod.upscale_video(
-            video_path,
-            model_name=model_name_from_selection(video_model),
-            lora_selection=lora_selection,
-            half=bool(half_precision),
-            outscale=float(outscale),
-            tile=int(tile_size) or None,
-            auto_download=bool(auto_download),
-            **common_kwargs,
-        )
-        task_label = "视频逐帧超分"
+    with task_control.task_scope("视频超分") as token:
+        common_kwargs["should_cancel"] = token.raise_if_cancelled
+        if use_maxine:
+            target, info = maxine_mod.upscale_video_maxine(video_path, **common_kwargs)
+            task_label = "Maxine 视频超分"
+        else:
+            target, info = rr_mod.upscale_video(
+                video_path,
+                model_name=model_name_from_selection(video_model),
+                lora_selection=lora_selection,
+                half=bool(half_precision),
+                outscale=float(outscale),
+                tile=int(tile_size) or None,
+                auto_download=bool(auto_download),
+                **common_kwargs,
+            )
+            task_label = "视频逐帧超分"
 
     log_task(task_label, {"model": video_model, "preview": preview_only, "format": video_format},
              info["elapsed"], get_device_summary(device))
@@ -763,6 +855,14 @@ def build_interface() -> gr.Blocks:
             "Maxine VSR 为可选时序超分组件。",
             elem_classes="sr-sub",
         )
+
+        # ---------------- 任务取消 / 显存释放（全局常驻，任何 Tab 都能用） ---------------- #
+        with gr.Row():
+            cancel_task_btn = gr.Button("⏹ 取消当前任务", variant="stop")
+            release_vram_btn = gr.Button("🧹 释放显存", variant="secondary")
+        task_status_md = gr.Markdown("_当前没有运行中的任务_")
+        cancel_task_btn.click(handle_cancel_task, outputs=[task_status_md])
+        release_vram_btn.click(handle_release_vram, outputs=[task_status_md])
 
         # ---------------- 全局控件 ---------------- #
         with gr.Accordion("⚙️ 全局设置", open=True):

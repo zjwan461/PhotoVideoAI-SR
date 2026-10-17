@@ -29,6 +29,7 @@ from src.common import (
     resolve_lora_path,
     unique_output_path,
 )
+from src.task_control import TaskCancelled
 
 logger = get_logger("img_sr")
 
@@ -386,6 +387,39 @@ def _auto_tile(device_index: int) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# 取消支持
+# --------------------------------------------------------------------------- #
+def _install_cancel_hooks(model, should_cancel: Callable[[], None] | None) -> list:
+    """在网络上挂「取消检查」钩子，返回可 ``remove()`` 的句柄列表。
+
+    为什么需要钩子：``RealESRGANer.enhance()`` 内部是一次循环（按 tile 或整图），
+    期间不回调我们，所以只靠「调用前后检查」无法在推理中途响应取消。
+    这里在**块级**子模块上注册 ``forward_pre_hook``，一次前向会被检查几十次
+    （RealESRGAN 有 23 个 RRDB 块，每块 4 个检查点），取消粒度约 0.3~0.5 秒。
+
+    只挂块级而不是每一层卷积：几百次多余的 Python 调用没有必要，收益也一样。
+    """
+    if should_cancel is None:
+        return []
+
+    def _hook(_module, _inputs):
+        should_cancel()
+
+    handles = []
+    try:
+        handles.append(model.register_forward_pre_hook(_hook))
+        body = getattr(model, "body", None)
+        if body is not None:
+            for block in body:
+                handles.append(block.register_forward_pre_hook(_hook))
+                for child in block.children():
+                    handles.append(child.register_forward_pre_hook(_hook))
+    except Exception:  # noqa: BLE001 - 钩子只是尽力而为，装不上也不该中断推理
+        logger.debug("取消钩子安装失败，退化为调用前后检查")
+    return handles
+
+
+# --------------------------------------------------------------------------- #
 # 引擎
 # --------------------------------------------------------------------------- #
 class RealESRGANEngine:
@@ -562,8 +596,15 @@ class RealESRGANEngine:
         target_long_edge: int = 0,
         face_restore: bool = False,
         face_restorer=None,
+        should_cancel: Callable[[], None] | None = None,
     ):
-        """对单张 RGB 图片做超分，并按需 Lanczos 缩放到目标长边。"""
+        """对单张 RGB 图片做超分，并按需 Lanczos 缩放到目标长边。
+
+        Args:
+            should_cancel: 可选的取消检查回调。传入时会在网络的**块级**子模块上
+                挂 forward 前钩子，因此取消能在一次前向（约 0.3~0.5 秒）内生效，
+                而不是等整张图跑完。
+        """
         _import_numpy()
         if not self.ready:
             raise ImageSRError("模型尚未加载，请先调用 load()。")
@@ -579,15 +620,26 @@ class RealESRGANEngine:
             alpha = None
 
         bgr = rgb_to_bgr(rgb)
+        hooks = _install_cancel_hooks(self.upsampler.model, should_cancel)
         try:
             output, _ = self.upsampler.enhance(
                 bgr, outscale=float(outscale), alpha_upsampler="realesrgan"
             )
+        except TaskCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             friendly = friendly_cuda_error(exc)
             if friendly:
                 raise ImageSRError(friendly) from exc
             raise ImageSRError(f"超分推理失败：{exc}") from exc
+        finally:
+            for handle in hooks:
+                handle.remove()
+
+        # enhance() 返回后还有 1 秒级的收尾（4800x3600 数组的 cpu 拷贝、转置、缩放），
+        # 这段时间钩子已经不再触发，所以在这里补一次检查，避免「点了取消却照常跑完」。
+        if should_cancel is not None:
+            should_cancel()
 
         result = bgr_to_rgb(output)
 
@@ -702,8 +754,15 @@ def upscale_image(
     auto_download: bool = True,
     face_restore: bool = False,
     progress: Callable[[float, str], None] | None = None,
+    should_cancel: Callable[[], None] | None = None,
 ) -> tuple[object, dict]:
     """单张图片超分（numpy RGB 进、numpy RGB 出）。
+
+    Args:
+        should_cancel: 可选的取消检查回调。在「开始前」与「模型加载完成后」
+            各调用一次，被取消时它应抛出 ``TaskCancelled``；
+            这样首次运行时漫长的模型下载/加载也能被取消。
+            真正的推理是一次不可打断的库调用，故单张图片只能在推理前响应取消。
 
     Returns:
         ``(result_rgb, info)``，info 含耗时、输入输出尺寸、模型与 LoRA 信息。
@@ -713,6 +772,8 @@ def upscale_image(
     started = time.time()
     target_long_edge = resolve_target_long_edge(preset_name)
 
+    if should_cancel is not None:
+        should_cancel()
     if progress:
         progress(0.01, "准备中…")
 
@@ -725,6 +786,10 @@ def upscale_image(
         auto_download=auto_download,
         progress=progress,
     )
+
+    # 模型加载可能包含首次下载（几十 MB～几百 MB），这里给用户一个取消机会
+    if should_cancel is not None:
+        should_cancel()
 
     face_restorer = None
     if face_restore:
@@ -740,6 +805,7 @@ def upscale_image(
         target_long_edge=target_long_edge,
         face_restore=face_restore,
         face_restorer=face_restorer,
+        should_cancel=should_cancel,
     )
     if progress:
         progress(1.0, "完成")

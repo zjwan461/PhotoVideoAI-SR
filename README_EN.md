@@ -56,6 +56,8 @@ upscaling and batch processing all happen on your own machine — no file is eve
 | 🖥️ Hardware encoding | Composited video prefers `h264_nvenc`, falling back to `libx264` when unavailable |
 | 🩺 Status panel | Shows the runtime environment summary, encoder availability, optional component status and the LoRA list |
 | 🛡️ Robustness | VRAM pre-check with friendly hints, missing-FFmpeg hints, per-frame failure fallback, automatic temp-file cleanup, read-only input files |
+| ⏹ Task cancellation | Image / batch / video tasks can be cancelled at any time, typically stopping within one second and cleaning up temporary files (works during model download too) |
+| 🧹 VRAM management | One click unloads the model and reclaims the CUDA cache, so OOM no longer means restarting the program (refuses while a task is active) |
 
 ---
 
@@ -218,10 +220,17 @@ python -c "import src.img_sr as m; print(m.HAS_REALESRGAN, m.REALESRGAN_IMPORT_E
 ### 6. Install Optional Dependencies (As Needed)
 
 ```bash
-pip install gfpgan          # Face restoration (also copy GFPGANv1.4.pth into model_weights/)
-pip install safetensors     # Read/write LoRA files in .safetensors format
+pip install gfpgan          # Face restoration: the library alone is not enough, you also
+                            # need GFPGANv1.4.pth (~350 MB) in model_weights/, otherwise
+                            # the UI hides the toggle
+pip install lpips           # Optional perceptual loss for fine-tuning (downloads VGG
+                            # weights, ~500 MB, on first use)
 # Maxine VSR: install the nvvfx components following NVIDIA's official documentation
 ```
+
+> `safetensors` is a default dependency (it reads third-party `.safetensors` LoRA files),
+> so no extra install is needed. `scikit-image` is **not** a dependency of this project;
+> it comes with basicsr (see step 4.3).
 
 ---
 
@@ -321,6 +330,29 @@ is described in the [「Fine-tuning」 subsection of the LoRA chapter](#fine-tun
 
 View the runtime environment summary, encoder availability, optional component status and the LoRA list, with one-click refresh (the dropdowns update after refreshing, so newly added LoRA files need no program restart).
 
+### ⏹ Cancel a Task / 🧹 Release VRAM
+
+Two buttons sit permanently at the top of the page (above the global settings), available from every Tab.
+
+**⏹ 取消当前任务 (Cancel current task)**
+
+* click it while an image / batch / video task is running and it usually stops **within about a second**,
+  leaving no temporary files behind;
+* it also works while the base model is being downloaded or loaded, so you do not have to wait it out;
+* images already finished in a batch stay in `output/batch/`; a cancelled video task produces no half-written file;
+* cancellation is cooperative: a cross-thread token is checked at block-level forward passes and at each
+  stage boundary, so there may be slightly under a second between "request sent" and the task actually stopping.
+
+**🧹 释放显存 (Release VRAM)**
+
+* unloads the loaded model and reclaims the CUDA cache, so a `CUDA out of memory` error **no longer requires
+  restarting the program**;
+* measured: after a 4K inference a single click reclaims more than 20 GB of cached memory;
+* it reports which model / LoRA was unloaded and the free VRAM on cuda:0 before and after;
+* it **refuses to run while a task is active** (so it never yanks the model out from under an inference) and
+  tells you to cancel first;
+* the next task reloads the model on demand, in about a second.
+
 ---
 
 ## Parameters
@@ -376,7 +408,7 @@ y = Conv_base(x) + (alpha / rank) * B(A(x))
 
 **Usage**
 
-1. Put `*.pth` (or `*.safetensors`, which requires `safetensors`) into `lora_weights/`;
+1. Put `*.pth` or `*.safetensors` files into `lora_weights/` (both can be read; this project always exports `.pth`);
 2. Select it in the 「LoRA 权重 (LoRA weights)」 dropdown of the photo / video Tab;
 3. To restore the native effect, select 「不使用 LoRA (No LoRA)」 again — the engine reloads a clean base model.
 

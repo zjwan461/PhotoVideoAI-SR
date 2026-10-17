@@ -314,6 +314,88 @@ def test_ffmpeg_installer() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 4.6 任务取消（协作式）
+# --------------------------------------------------------------------------- #
+def test_cancel(device: str, work: Path) -> None:
+    section("任务取消（令牌 / 视频中途 / 批量中途）")
+    import threading
+
+    from src import task_control, video_sr_realesrgan
+
+    # --- 令牌本身 ---
+    with task_control.task_scope("自测令牌") as token:
+        check("作用域注册后可见", task_control.active_count() == 1,
+              f"{task_control.active_count()} 个")
+        token.raise_if_cancelled()
+        check("未取消时检查不抛异常", True)
+        sent = task_control.cancel_all()
+        check("cancel_all 返回受影响任务数", sent == 1, f"{sent} 个")
+        raised = False
+        try:
+            token.raise_if_cancelled()
+        except task_control.TaskCancelled:
+            raised = True
+        check("取消后立即抛 TaskCancelled", raised)
+    check("作用域退出后自动注销", task_control.active_count() == 0)
+
+    # --- 视频：中途取消 ---
+    clip = work / "cancel_clip.mp4"
+    if check("生成用于取消测试的视频", _make_clip(clip, seconds=2.0)):
+        timer = threading.Timer(1.5, task_control.cancel_all)
+        cancelled = False
+        try:
+            with task_control.task_scope("视频超分（取消测试）") as token:
+                timer.start()
+                video_sr_realesrgan.upscale_video(
+                    clip,
+                    device=device,
+                    outscale=4.0,
+                    half=True,
+                    video_format="MP4",
+                    auto_download=False,
+                    should_cancel=token.raise_if_cancelled,
+                )
+        except task_control.TaskCancelled:
+            cancelled = True
+        finally:
+            timer.cancel()
+        check("视频任务可被中途取消", cancelled)
+        leftovers = [p.name for p in config.TEMP_DIR.glob("video_sr_*")]
+        check("取消后临时目录已清理", not leftovers, str(leftovers[:3]))
+
+    # --- 批量：中途取消（经 app 处理器，顺带验证面向前端的提示文案） ---
+    import app as app_module
+
+    batch_dir = work / "cancel_batch"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    import cv2
+
+    for index in range(6):
+        cv2.imwrite(
+            str(batch_dir / f"img_{index}.png"),
+            cv2.cvtColor(_make_photo(800, 600), cv2.COLOR_RGB2BGR),
+        )
+
+    timer = threading.Timer(0.8, task_control.cancel_all)
+    message = ""
+    cancelled = False
+    try:
+        timer.start()
+        app_module.handle_image_batch(
+            None, str(batch_dir), "原始比例 (不限制长边)", device,
+            config.DEFAULT_MODEL_NAME, app_module.NO_LORA, True, 4.0, 0, False, "PNG",
+            progress=PlainProgress(),
+        )
+    except Exception as exc:  # noqa: BLE001 - safe_handler 会把它转成 gr.Error
+        message = str(exc)
+        cancelled = "取消" in message
+    finally:
+        timer.cancel()
+    check("批量任务可被中途取消", cancelled, message[:80])
+    check("取消提示对用户可读", "已取消" in message, message[:80])
+
+
+# --------------------------------------------------------------------------- #
 # 5. GPU 微调冒烟
 # --------------------------------------------------------------------------- #
 def test_training(device: str, work: Path) -> None:
@@ -450,6 +532,50 @@ def test_ui(device: str, work: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 7. 释放显存
+# --------------------------------------------------------------------------- #
+def test_release_vram(device: str, work: Path) -> None:
+    section("释放显存（卸载模型 + 回收 CUDA 缓存）")
+    import app
+
+    from src import img_sr, task_control
+    from src.common import get_free_vram_gb
+
+    # 先制造真实占用：加载模型 + 一次 4K 推理会留下大量缓存池
+    img_sr.upscale_image(
+        _make_photo(640, 480),
+        preset_name="4K (3840x2160)",
+        device=device,
+        half=True,
+        outscale=4.0,
+        auto_download=False,
+    )
+    check("推理后引擎处于已加载状态", img_sr.get_engine().ready)
+    before = get_free_vram_gb(0)
+
+    message = app.handle_release_vram()
+    after = get_free_vram_gb(0)
+
+    check("释放后引擎已卸载", not img_sr.get_engine().ready)
+    check("提示里报告了模型与显存", "卸载的模型" in message and "空闲显存" in message)
+    if before is not None and after is not None:
+        check("空闲显存确有增加", after >= before - 0.05,
+              f"{before:.2f} → {after:.2f} GB")
+
+    # 有任务在跑时必须拒绝，否则会把正在推理的模型卸掉
+    with task_control.task_scope("占位任务"):
+        warning = app.handle_release_vram()
+    check("有任务运行时拒绝释放", "正在运行" in warning, warning[:60])
+
+    # 释放后应能立即继续工作（按需重新加载）
+    result, _info = img_sr.upscale_image(
+        _make_photo(128, 96), device=device, half=True, outscale=4.0, auto_download=False
+    )
+    check("释放后仍可继续推理", result.shape[:2] == (384, 512),
+          f"{result.shape[1]}x{result.shape[0]}")
+
+
+# --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PhotoVideoAI-SR 端到端自测")
     parser.add_argument("--skip-train", action="store_true", help="跳过 GPU 微调冒烟")
@@ -486,11 +612,13 @@ def main(argv: list[str] | None = None) -> int:
         test_video(device, work)
         test_encoders()
         test_ffmpeg_installer()
+        test_cancel(device, work)
         if args.skip_train:
             skip("LoRA 微调", "--skip-train")
         else:
             test_training(device, work)
         test_ui(device, work)
+        test_release_vram(device, work)
     finally:
         elapsed = time.time() - started
         print("\n" + "=" * 60)

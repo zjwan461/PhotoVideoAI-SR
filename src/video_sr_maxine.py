@@ -213,10 +213,12 @@ def upscale_video_maxine(
     crf: int | None = None,
     keep_audio: bool = True,
     progress: Callable[[float, str], None] | None = None,
+    should_cancel: Callable[[], None] | None = None,
 ) -> tuple[Path, dict]:
     """用 Maxine VSR 对视频做时序超分（逐帧顺序推理）。
 
-    与 RealESRGAN 链路一样，全程在 temp/ 子目录中操作并在结束时清理。
+    与 RealESRGAN 链路一样，全程在 temp/ 子目录中操作并在结束时清理；
+    ``should_cancel`` 会在每帧之前被调用，用于响应界面上的「取消任务」。
     """
     _require_maxine()
     started = time.time()
@@ -273,6 +275,8 @@ def upscale_video_maxine(
 
         processed = 0
         for index, frame_path in enumerate(frames, start=1):
+            if should_cancel is not None:
+                should_cancel()
             frame = img_sr.read_image(frame_path)
             try:
                 result = vsr.upscale_frame(frame)
