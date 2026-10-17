@@ -168,6 +168,17 @@ DEFAULT_VIDEO_BITRATE_MBPS: float | None = None
 #: 视频默认帧率（当源视频探测不到 fps 时使用）
 DEFAULT_FPS: float = 25.0
 
+
+def video_pipeline() -> str:
+    """返回视频处理管线：``stream``（默认，管道式）或 ``files``（拆帧成 PNG）。
+
+    设环境变量 ``PVSR_VIDEO_PIPELINE=files`` 可强制使用文件管线，便于对比或排查。
+    """
+    value = os.environ.get("PVSR_VIDEO_PIPELINE", "stream").strip().lower()
+    if value in {"files", "legacy", "0", "false", "off"}:
+        return "files"
+    return "stream"
+
 #: 单张图片/单帧推理的分块大小，越小越省显存
 TILE_SIZE: int = int(os.environ.get("PVSR_TILE", "0"))  # 0 = 自动
 TILE_PAD: int = int(os.environ.get("PVSR_TILE_PAD", "10"))

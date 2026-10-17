@@ -48,7 +48,7 @@ upscaling and batch processing all happen on your own machine — no file is eve
 | --- | --- |
 | 📷 Photo upscaling | Single-image upscaling; the result is automatically Lanczos-resized to 720p / 1080p / 2K / 4K / 8K or kept at the original ratio; PNG / JPG output |
 | 📁 Batch processing | Upload several images at once, or point at a folder on the server; results all go to `output/batch/` with a success/failure summary |
-| 🎬 Video upscaling | RealESRGAN per-frame pipeline; audio track extracted and muxed back; MP4 / MKV output; output frame rate can be overridden |
+| 🎬 Video upscaling | RealESRGAN per-frame pipeline; **streaming pipeline** (decode → infer → encode, no intermediate frames on disk); audio track extracted and muxed back; MP4 / MKV output; output frame rate can be overridden |
 | ⚡ Preview mode | Render only the first N frames (30 by default) to preview the effect, so you need not wait for the whole video |
 | 🧩 LoRA loading | Pick weights from `lora_weights/` in the dropdown, injected into the convolution layers, switch or unload at any time; nothing selected means the pure native base model |
 | 🧪 LoRA fine-tuning | A separate 「模型微调 (Model Fine-tuning)」 Tab: automatic degradation to generate LR, trains LoRA parameters only, validation preview images + PSNR during training, resume from checkpoint, LoRA-only export |
@@ -90,7 +90,7 @@ PhotoVideoAI-SR/
 │   └── selftest_e2e.py             # End-to-end real-machine acceptance (needs CUDA + weights; image/video/LoRA/fine-tuning/UI)
 ├── scripts/
 │   └── install.py                  # One-click installer (handles CUDA torch / basicsr / mirrors)
-├── temp/                           # Temporary frames and audio (auto-cleaned when a task ends)
+├── temp/                           # Temporary audio (and frames, in file mode); auto-cleaned when a task ends
 ├── output/                         # Inference output (batch/ holds batch results)
 ├── lora_weights/                   # LoRA weights *.pth / *.safetensors
 ├── model_weights/                  # Base model weights, e.g. RealESRGAN_x4plus.pth
@@ -119,6 +119,7 @@ PhotoVideoAI-SR/
 **Optional**
 
 * `nvvfx` (NVIDIA Maxine VSR): temporal video upscaling. When it is not installed the UI hides that option automatically, and the main flow is unaffected.
+  Install it with `python scripts/install.py --maxine` (see step 6 below).
 * `gfpgan`: face restoration for old photos. When it is not installed the corresponding toggle is hidden; it also requires the extra `GFPGANv1.4.pth` weights.
 
 > Runs on both Windows and Linux; Windows users should make sure `ffmpeg.exe` / `ffprobe.exe` are on PATH.
@@ -225,8 +226,20 @@ pip install gfpgan          # Face restoration: the library alone is not enough,
                             # the UI hides the toggle
 pip install lpips           # Optional perceptual loss for fine-tuning (downloads VGG
                             # weights, ~500 MB, on first use)
-# Maxine VSR: install the nvvfx components following NVIDIA's official documentation
+
+# Maxine VSR temporal upscaling (optional, closed source): the one-click installer is recommended
+python scripts/install.py --maxine
+# Equivalent manual command (the NVIDIA index is mandatory):
+#   pip install nvidia-vfx --index-url https://pypi.nvidia.com
 ```
+
+> **Two gotchas with Maxine**:
+> 1. `nvidia-vfx` on PyPI is only a **3.6 KB placeholder package** — installing it does not
+>    give you `nvvfx`. The real wheel (~400 MB, VFX runtime included) is published only on
+>    `https://pypi.nvidia.com`.
+> 2. It has hardware requirements: an NVIDIA GPU with Tensor Cores (Turing or newer), driver
+>    570.65+ on Windows / 570.190+ on Linux, Python 3.10+.
+>    Once installed, the video Tab gains a `Maxine VSR` option; without it the option is hidden.
 
 > `safetensors` is a default dependency (it reads third-party `.safetensors` LoRA files),
 > so no extra install is needed. `scikit-image` is **not** a dependency of this project;
@@ -321,6 +334,35 @@ scanned recursively), then click 「开始批量超分 (Start batch upscaling)�
 
 > **Maxine VSR does not support LoRA**: it is a closed-source component whose model parameters cannot be trained; use the RealESRGAN pipeline if you need style customization.
 
+**Processing pipeline (performance)**
+
+By default the pipeline is **streaming**: decode → inference → encode run end to end, frames travel
+between the processes as `rawvideo`, and **no intermediate PNG is ever written**. Compared with the old
+"extract all frames to PNG → read/write each frame → composite", this removes one PNG encode + disk write
++ read + decode per frame.
+
+Measured (640×360 → 2560×1440, 150 frames, RTX 4080 SUPER, FP16):
+
+| Pipeline | Time | Per frame | Throughput |
+| --- | --- | --- | --- |
+| File-based (old) | 84.6 s | 564 ms | 1.77 fps |
+| **Streaming (default)** | **52.9 s** | **353 ms** | **2.84 fps** |
+
+That is about **1.6x faster, 37% less wall time**; GPU utilisation rises from roughly 55% to about 80%
+(the remainder is the super-resolution network's own forward pass — measured at ~281 ms for a 640×360 input).
+
+**The Maxine pipeline uses the same streaming path**, where the gain is even larger (a Maxine frame takes only
+~10 ms, so the PNG round-trip used to dominate):
+
+| Pipeline | 50 frames | Throughput |
+| --- | --- | --- |
+| File-based | 7.88 s | 6.3 fps |
+| **Streaming (default)** | **2.14 s** | **23.4 fps** |
+
+If the streaming pipeline is unavailable (an error, an unsupported environment) it **falls back automatically**
+to the file-based one, with identical output specs. To force the old pipeline for comparison or debugging, set
+`PVSR_VIDEO_PIPELINE=files`.
+
 ### 🧪 模型微调 (Model Fine-tuning)
 
 The complete workflow for training a custom LoRA (data preparation → preview degradation → start training → check validation images → export → select)
@@ -385,7 +427,7 @@ instead of throwing a raw CUDA stack trace.
 | Fine-tunable | ✅ Supports training and loading LoRA weights (see the 「Fine-tuning」 chapter) | ❌ Not supported, parameters not exposed |
 | Style | Sharp detail, strong texture reconstruction, fine-tunable for specific footage | Stable picture, good temporal consistency, fixed style |
 | Input | Works for both images and video, processed frame by frame | Video only, frames must be fed in temporal order |
-| Dependency | `realesrgan` / `basicsr` | `nvvfx` (optional, hidden automatically when missing) |
+| Dependency | `realesrgan` / `basicsr` | `nvidia-vfx` (`scripts/install.py --maxine`; hidden automatically when missing) |
 | Use cases | Old photos, anime, footage that needs a custom style | Real-time / near-real-time viewing, videos where a stable picture matters |
 
 Recommendation: **custom style or image processing → RealESRGAN; just want sharper, more stable video and nvvfx is available → Maxine.**
@@ -509,6 +551,7 @@ print(runner.status(), runner.result)
 | `PVSR_FFMPEG_URL` | Chosen per platform | Custom FFmpeg download URL (internal mirror / proxy) |
 | `PVSR_TOOLS_DIR` | `tools/` inside the project | Install directory for bundled tools |
 | `PVSR_FFMPEG_TIMEOUT` | 3600 | Timeout for a single FFmpeg command (seconds) |
+| `PVSR_VIDEO_PIPELINE` | `stream` | Video pipeline: `stream` = pipe-based (default, ~1.6x faster) / `files` = extract PNG frames then composite (fallback) |
 | `PVSR_TEMP_DIR` / `PVSR_OUTPUT_DIR` / `PVSR_LORA_DIR` / `PVSR_MODEL_DIR` / `PVSR_LOG_DIR` | Directories inside the project | Customize the location of each directory |
 | `PVSR_HALF` | 1 | Whether to use half-precision inference by default |
 | `PVSR_KEEP_TEMP` | 0 | 1 = keep temporary files |
@@ -523,10 +566,12 @@ print(runner.status(), runner.result)
 ## Known Limitations
 
 1. **NVIDIA CUDA only**: AMD / Apple Silicon / pure CPU are out of scope; without CUDA the program exits immediately with a message.
-2. **The Maxine smoke test depends on the official SDK**: without `nvvfx` installed that pipeline is unavailable (the UI hides it automatically); APIs differ between versions,
-   and the program includes compatibility checks — if your version reports “session creation failed”, please attach the version information in an
-   [Issues](https://github.com/zjwan461/PhotoVideoAI-SR/issues) report.
-3. **Per-frame video upscaling time and disk usage grow linearly with the frame count**: for long videos, confirm the parameters in preview mode first.
+2. **Maxine depends on an optional closed-source SDK**: `nvidia-vfx` must be installed separately
+   (`scripts/install.py --maxine`), and only then is that pipeline available (hidden automatically when missing).
+   This project targets the **nvidia-vfx 0.2.x API** (CUDA tensors + DLPack output); with an older version the
+   program gives a readable version hint instead of a cryptic error.
+3. **Video upscaling time grows linearly with the frame count**: for long videos, confirm the parameters in preview mode first.
+   Disk usage is no longer a concern — the default streaming pipeline writes no intermediate frames (only the audio track is staged in `temp/`).
 4. **Audio track handling**: when the source video has no audio track the output is a silent video; in MKV audio is copied directly, which fails if the source audio codec is not supported by the container.
 5. **A LoRA must match the base model architecture**: `rank` is inferred from the weight file automatically; when the match is below 50% loading is refused with an explanation,
    rather than silently applying only part of it.

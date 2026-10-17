@@ -452,6 +452,155 @@ def extract_audio(
 
 
 # --------------------------------------------------------------------------- #
+# 管道式解码 / 编码（不落中间帧文件）
+# --------------------------------------------------------------------------- #
+#: 管道里统一的像素格式：RGB 与项目内部数组一致，省掉两次色序转换
+PIPE_PIX_FMT = "rgb24"
+
+
+def read_exact(stream, size: int) -> bytes | None:
+    """从管道里精确读 ``size`` 字节。
+
+    Returns:
+        读满时返回 bytes；在**帧边界**遇到 EOF（视频正常结束）返回 None；
+        读到一半就 EOF 表示解码异常，抛 :class:`FFmpegError`。
+    """
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining > 0:
+        chunk = stream.read(remaining)
+        if not chunk:
+            if remaining == size:
+                return None
+            raise FFmpegError(
+                f"解码管道提前结束：本帧还差 {remaining} 字节，视频可能已损坏。"
+            )
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def spawn_frame_decoder(source: str | Path, *, stderr=None, pix_fmt: str = PIPE_PIX_FMT):
+    """启动解码进程：把视频逐帧以 rawvideo 写到 ``stdout``。
+
+    Args:
+        source: 输入视频。
+        stderr: 重定向目标（文件对象）；为 None 时丢弃，避免管道写满导致死锁。
+        pix_fmt: 输出像素格式，默认 ``rgb24``。
+
+    Returns:
+        ``subprocess.Popen``；调用方负责读 ``stdout`` 并 ``terminate``/``wait``。
+    """
+    ensure_ffmpeg()
+    source_path = Path(source)
+    if not source_path.is_file():
+        raise FFmpegError(f"输入视频不存在：{source_path}")
+    command = [
+        config.FFMPEG_BIN, "-hide_banner", "-nostdin", "-v", "error",
+        "-i", str(source_path),
+        "-map", "0:v:0",
+        "-f", "rawvideo", "-pix_fmt", pix_fmt, "-",
+    ]
+    logger.debug("解码进程：%s", " ".join(command))
+    try:
+        return subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=stderr if stderr is not None else subprocess.DEVNULL,
+            bufsize=0,
+        )
+    except OSError as exc:
+        raise FFmpegError(f"无法启动解码进程：{exc}", command=command) from exc
+
+
+def even_size(value: int) -> int:
+    """把尺寸向下取整到偶数（yuv420p 要求宽高为偶数）。"""
+    value = int(value)
+    return value if value % 2 == 0 else value - 1
+
+
+def spawn_frame_encoder(
+    output_path: str | Path,
+    width: int,
+    height: int,
+    *,
+    fps: float,
+    stderr=None,
+    audio_path: str | Path | None = None,
+    video_format: str = "MP4",
+    codec: str = "h264_nvenc",
+    bitrate_mbps: float | None = None,
+    crf: int | None = None,
+    pix_fmt: str = "yuv420p",
+):
+    """启动编码进程：从 ``stdin`` 读 rawvideo 帧，编码成视频文件。
+
+    参数语义与 :func:`combine_frames_to_video` 保持一致（质量模式 / 容器 / 音轨）。
+
+    Returns:
+        ``subprocess.Popen``；调用方写完 ``stdin`` 后要 ``close()`` 再 ``wait()``。
+    """
+    ensure_ffmpeg()
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    video_format = video_format.upper()
+    container = config.VIDEO_CODEC_MAP.get(video_format, config.VIDEO_CODEC_MAP["MP4"])
+
+    out_w, out_h = even_size(width), even_size(height)
+    if (out_w, out_h) != (int(width), int(height)):
+        logger.warning(
+            "输出尺寸 %dx%d 不是偶数，已调整为 %dx%d（yuv420p 要求）",
+            width, height, out_w, out_h,
+        )
+    has_audio = bool(audio_path) and Path(audio_path).is_file()
+
+    command = [
+        config.FFMPEG_BIN, "-hide_banner", "-nostdin", "-y",
+        "-f", "rawvideo", "-pix_fmt", PIPE_PIX_FMT,
+        "-s", f"{out_w}x{out_h}",
+        "-framerate", f"{float(fps):.6f}",
+        "-i", "-",
+    ]
+    if has_audio:
+        command += ["-i", str(audio_path)]
+
+    selected = codec if (codec == "libx264" or has_nvenc(codec)) else "libx264"
+    command += ["-c:v", selected]
+    if selected == "h264_nvenc":
+        if bitrate_mbps:
+            command += [
+                "-b:v", f"{int(float(bitrate_mbps) * 1_000_000)}",
+                "-maxrate", f"{int(float(bitrate_mbps) * 1.5 * 1_000_000)}",
+            ]
+        else:
+            command += ["-rc", "vbr", "-cq", str(int(crf if crf is not None else config.FFMPEG_CRF)), "-b:v", "0"]
+        command += ["-preset", "p5", "-tune", "hq", "-pix_fmt", pix_fmt]
+    else:
+        command += ["-preset", config.FFMPEG_X264_PRESET, "-pix_fmt", pix_fmt]
+        if bitrate_mbps:
+            command += ["-b:v", f"{int(float(bitrate_mbps) * 1_000_000)}"]
+        else:
+            command += ["-crf", str(int(crf if crf is not None else config.FFMPEG_CRF))]
+    if has_audio:
+        command += ["-c:a", container["audio_codec"], "-shortest"]
+    if video_format == "MP4":
+        command += ["-movflags", "+faststart"]
+    command += [str(target)]
+
+    logger.debug("编码进程：%s", " ".join(command))
+    try:
+        return subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr if stderr is not None else subprocess.DEVNULL,
+            bufsize=0,
+        )
+    except OSError as exc:
+        raise FFmpegError(f"无法启动编码进程：{exc}", command=command) from exc
+
+
+# --------------------------------------------------------------------------- #
 # 合并
 # --------------------------------------------------------------------------- #
 def combine_frames_to_video(

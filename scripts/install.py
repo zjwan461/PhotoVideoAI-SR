@@ -17,6 +17,7 @@
     python scripts/install.py --mirror cn     # 国内镜像（PyPI 清华 + PyTorch SJTU）
     python scripts/install.py --skip-torch    # 已装好 CUDA 版 PyTorch，只补其余依赖
     python scripts/install.py --cpu           # 装 CPU 版 PyTorch（仅用于看界面调试）
+    python scripts/install.py --maxine        # 额外安装 Maxine VSR（nvidia-vfx，约 400 MB）
     python scripts/install.py --dry-run       # 只打印将要执行的命令
 
 脚本是幂等的：已经满足的步骤会跳过，可放心重复运行。
@@ -27,6 +28,9 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -38,6 +42,25 @@ TORCH_INDEX_CN = "https://mirror.sjtu.edu.cn/pytorch-wheels/cu126"
 TORCH_INDEX_CPU = "https://download.pytorch.org/whl/cpu"
 #: 国内 PyPI 镜像
 PYPI_CN = "https://pypi.tuna.tsinghua.edu.cn/simple"
+#: NVIDIA 官方 wheel 索引（Maxine VSR / nvidia-vfx 只在这里发布）。
+#: 注意：PyPI 上的 ``nvidia-vfx`` 只是一个 3.6 KB 的占位包，装它得不到 ``nvvfx``。
+MAXINE_INDEX = "https://pypi.nvidia.com"
+
+#: GFPGAN 人脸修复权重（官方发布地址）
+GFPGAN_WEIGHTS_URL = (
+    "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth"
+)
+#: 权重文件名（必须与 config.gfpgan_weights_path() 一致）
+GFPGAN_WEIGHTS_NAME = "GFPGANv1.4.pth"
+#: 下载 User-Agent，部分 CDN 会拒绝 urllib 默认值
+_UA = "PhotoVideoAI-SR-installer/1.0"
+
+#: Maxine VSR 的硬件/驱动要求（失败时原样打印给用户）
+MAXINE_REQUIREMENTS = """\
+  * GPU：带 Tensor Core 的 NVIDIA 显卡（Turing / Ampere / Ada / Blackwell / Hopper）
+  * 驱动：Windows 570.65+（TCC 设备需 595+）；Linux 570.190+ / 580.82+ / 590.44+
+  * Python 3.10+；Windows 10+ 或 Ubuntu 20.04/22.04/24.04、Debian 12、RHEL 8/9
+  * wheel 约 400 MB（含 VFX 运行时库），首次安装需要能访问 pypi.nvidia.com"""
 
 #: basicsr 真正需要的运行时依赖（--no-deps 安装后手动补齐）
 BASICSR_RUNTIME_DEPS = [
@@ -218,6 +241,46 @@ def install_super_resolution(args: argparse.Namespace) -> bool:
     return True
 
 
+def install_maxine(args: argparse.Namespace) -> bool:
+    """安装 NVIDIA Maxine VSR（``nvidia-vfx``，可选闭源组件）。
+
+    只在显式传入 ``--maxine`` 时执行：wheel 约 400 MB，且对显卡/驱动有要求。
+    """
+    section("安装 Maxine VSR（可选，闭源组件）")
+
+    ok, _ = python_check("import nvvfx")
+    if ok:
+        print("  ✅ 已安装 nvidia-vfx（nvvfx 可导入），跳过。")
+        return True
+
+    index = args.maxine_index or MAXINE_INDEX
+    print("  说明：这是 NVIDIA 闭源组件，不支持 LoRA；装好后视频 Tab 会多出 Maxine 选项。")
+    print(MAXINE_REQUIREMENTS)
+
+    code = pip_install(["nvidia-vfx"], index=index, dry_run=args.dry_run)
+    if code != 0:
+        print("  ❌ nvidia-vfx 安装失败。可手动执行：")
+        print(f"     {sys.executable} -m pip install nvidia-vfx --index-url {index}")
+        return False
+    if args.dry_run:
+        return True
+
+    ok, output = python_check(
+        "import nvvfx, json;"
+        "print(json.dumps({"
+        "'version': getattr(nvvfx, '__version__', 'unknown'),"
+        "'has_vsr': hasattr(nvvfx, 'VideoSuperRes')}))"
+    )
+    if not ok:
+        print("  ❌ 已安装但无法导入 nvvfx：")
+        print("\n".join(f"     {line}" for line in output.splitlines()[:6]))
+        print("     常见原因：显卡不带 Tensor Core、驱动版本过低，或缺少 VC++ 运行库。")
+        return False
+
+    print(f"  ✅ nvidia-vfx 可用：{output.splitlines()[-1]}")
+    return True
+
+
 def verify(args: argparse.Namespace) -> bool:
     section("验证安装结果")
     if args.dry_run:
@@ -237,11 +300,21 @@ def verify(args: argparse.Namespace) -> bool:
     if not ok:
         print("  ❌ 验证失败：上面的报错说明了缺失或冲突的依赖。")
         return False
+
+    # Maxine 是可选组件，装没装都不影响主流程，只做信息展示
+    maxine_ok, maxine_out = python_check(
+        "import nvvfx; print(getattr(nvvfx, '__version__', 'unknown'))"
+    )
+    if maxine_ok:
+        print(f"  nvvfx（Maxine VSR）: 可用 {maxine_out.splitlines()[-1]}")
+    else:
+        print("  nvvfx（Maxine VSR）: 未安装（可选，视频 Tab 不会显示该选项）")
+
     print("  ✅ 依赖安装完成")
     return True
 
 
-def next_steps() -> None:
+def next_steps(*, maxine: bool = False) -> None:
     section("下一步")
     print("  1) 放置基础模型（或让程序首次推理时自动下载）：")
     print(f"     {PROJECT_ROOT / 'model_weights' / 'RealESRGAN_x4plus.pth'}")
@@ -250,6 +323,9 @@ def next_steps() -> None:
     print("  3) 自测：")
     print(f"     {sys.executable} tests/selftest.py")
     print(f"     {sys.executable} tests/selftest_e2e.py")
+    if not maxine:
+        print("  4) 想用 Maxine VSR 时序超分，再执行：")
+        print(f"     {sys.executable} scripts/install.py --maxine")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -265,6 +341,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="跳过 PyTorch 安装（已装好 CUDA 版时使用）")
     parser.add_argument("--cpu", action="store_true",
                         help="安装 CPU 版 PyTorch（仅用于界面调试，推理会失败）")
+    parser.add_argument("--maxine", action="store_true",
+                        help="额外安装 NVIDIA Maxine VSR（nvidia-vfx，约 400 MB，可选）")
+    parser.add_argument("--maxine-index", default=None,
+                        help=f"nvidia-vfx 的索引地址（默认 {MAXINE_INDEX}）")
     parser.add_argument("--dry-run", action="store_true", help="只打印命令，不执行")
     return parser.parse_args(argv)
 
@@ -292,10 +372,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if not install_super_resolution(args):
         return 1
+    if args.maxine:
+        if not install_maxine(args):
+            return 1
     if not verify(args):
         return 1
 
-    next_steps()
+    next_steps(maxine=args.maxine)
     print("\n完成。")
     return 0
 

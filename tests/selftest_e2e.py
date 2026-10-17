@@ -251,6 +251,7 @@ def test_video(device: str, work: Path) -> None:
     )
     check("预览模式只渲染 6 帧", info["frames"] == 6, f"frames={info['frames']}")
     check("预览输出为 4 倍分辨率", info["output_size"] == "1280x960", info["output_size"])
+    check("预览走管道式管线", info.get("pipeline") == "stream", str(info.get("pipeline")))
     out_info = ffmpeg_utils.get_video_info(target)
     check("预览输出可解码", out_info["nb_frames"] == 6, f"nb_frames={out_info['nb_frames']}")
 
@@ -270,6 +271,46 @@ def test_video(device: str, work: Path) -> None:
           out_info2["duration"] is not None
           and abs(out_info2["duration"] - src_info["duration"]) < 0.3,
           f"src={src_info['duration']}s out={out_info2['duration']}s")
+
+    # 回退链路（文件管线）也必须可用，否则环境不支持管道时会无路可走
+    import os
+
+    previous = os.environ.get("PVSR_VIDEO_PIPELINE")
+    os.environ["PVSR_VIDEO_PIPELINE"] = "files"
+    try:
+        target3, info3 = video_sr_realesrgan.upscale_video(
+            source, device=device, outscale=4.0, half=True,
+            preview_only=True, preview_frames=4, auto_download=False,
+        )
+        check("文件管线回退可用", info3.get("pipeline") == "files",
+              str(info3.get("pipeline")))
+        check("文件管线输出可解码",
+              ffmpeg_utils.get_video_info(target3)["nb_frames"] == 4)
+    finally:
+        if previous is None:
+            os.environ.pop("PVSR_VIDEO_PIPELINE", None)
+        else:
+            os.environ["PVSR_VIDEO_PIPELINE"] = previous
+
+    # Maxine VSR（可选闭源组件）：装了才测，没装自动跳过
+    from src import video_sr_maxine
+
+    if not config.maxine_available():
+        skip("Maxine 链路", "未安装 nvidia-vfx（可选组件，python scripts/install.py --maxine）")
+        return
+    try:
+        target4, info4 = video_sr_maxine.upscale_video_maxine(
+            source, device=device, preview_only=True, preview_frames=4,
+            video_format="MP4",
+        )
+        check("Maxine 链路可用", info4.get("pipeline") == "stream",
+              str(info4.get("pipeline")))
+        check("Maxine 输出为 2 倍分辨率", info4["output_size"] == "640x480",
+              info4["output_size"])
+        check("Maxine 输出可解码",
+              ffmpeg_utils.get_video_info(target4)["nb_frames"] == 4)
+    except Exception as exc:  # noqa: BLE001
+        check("Maxine 链路可用", False, str(exc)[:100])
 
 
 # --------------------------------------------------------------------------- #
@@ -360,7 +401,12 @@ def test_cancel(device: str, work: Path) -> None:
         finally:
             timer.cancel()
         check("视频任务可被中途取消", cancelled)
-        leftovers = [p.name for p in config.TEMP_DIR.glob("video_sr_*")]
+        # 只看**本进程**创建的目录：temp/ 可能同时有别的实例（比如正在跑的 WebUI）在用
+        import os as _os
+
+        leftovers = [
+            p.name for p in config.TEMP_DIR.glob(f"video_sr*_{_os.getpid()}_*")
+        ]
         check("取消后临时目录已清理", not leftovers, str(leftovers[:3]))
 
     # --- 批量：中途取消（经 app 处理器，顺带验证面向前端的提示文案） ---

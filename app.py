@@ -150,6 +150,11 @@ def info_panel_html(info: dict) -> str:
     free_vram = info.get("free_vram_gb")
     if free_vram is not None:
         rows.append(("任务后空闲显存", f"{free_vram} GB"))
+    pipeline = info.get("pipeline")
+    if pipeline:
+        rows.append(
+            ("处理管线", "管道式（不落中间帧）" if pipeline == "stream" else "文件式（PNG 帧）")
+        )
     body = "\n".join(f"| {key} | {value} |" for key, value in rows)
     return "| 项目 | 值 |\n| --- | --- |\n" + body
 

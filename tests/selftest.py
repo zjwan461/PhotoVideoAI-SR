@@ -23,10 +23,10 @@ if str(PROJECT_ROOT) not in sys.path:
 import config  # noqa: E402
 from src import ffmpeg_utils  # noqa: E402
 from src.common import (  # noqa: E402
-    cleanup_temp_dir,
     lora_choices,
     make_temp_subdir,
     resolve_lora_path,
+    safe_remove,
     scan_lora_weights,
 )
 
@@ -110,9 +110,10 @@ def test_ffmpeg_chain() -> None:
         except ffmpeg_utils.FFmpegError as exc:
             check("损坏视频报错", "损坏" in str(exc), str(exc)[:60])
     finally:
-        cleanup_temp_dir()
+        # 只清理本次测试自己的子目录：temp/ 里可能有其它实例（如正在跑的 WebUI）
+        safe_remove(work)
 
-    check("临时目录已清空", not [p for p in config.TEMP_DIR.iterdir() if p.name != ".gitkeep"])
+    check("临时目录已清空", not work.exists())
 
 
 def test_cuda_and_inference() -> None:

@@ -19,5 +19,10 @@ safetensors>=0.4.0       # read .safetensors LoRA files (export is always .pth)
 # lpips>=0.1.4           # perceptual loss for LoRA fine-tuning; downloads VGG
 #                        # weights (~500 MB) on first use, falls back to plain L1
 #
+# Maxine VSR is installed by the project's installer, not from here:
+#     python scripts/install.py --maxine
+# (nvidia-vfx on PyPI is only a 3.6 KB placeholder; the real ~400 MB wheel lives on
+#  https://pypi.nvidia.com and needs a Tensor Core GPU + driver 570.65+.)
+#
 # Note: scikit-image is NOT a dependency of this project. It comes with basicsr,
 # which is installed separately in step 4.3 of the README.

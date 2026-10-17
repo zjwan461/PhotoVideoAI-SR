@@ -48,7 +48,7 @@ FFmpeg 负责媒体编解码。老照片修复、低分辨率视频放大、批�
 | --- | --- |
 | 📷 照片超分 | 单图超分；结果自动 Lanczos 缩放到 720p / 1080p / 2K / 4K / 8K 或保持原始比例；PNG / JPG 输出 |
 | 📁 批量处理 | 一次上传多张图片，或指定服务器上的文件夹，结果统一写入 `output/batch/`，带成功/失败汇总 |
-| 🎬 视频超分 | RealESRGAN 逐帧链路；提取并回填音轨；MP4 / MKV 输出；可覆盖输出帧率 |
+| 🎬 视频超分 | RealESRGAN 逐帧链路；**管道式处理**（解码 → 推理 → 编码全程流式，不落中间帧）；提取并回填音轨；MP4 / MKV 输出；可覆盖输出帧率 |
 | ⚡ 预览模式 | 只渲染前 N 帧（默认 30 帧）即可预览效果，不必等整片跑完 |
 | 🧩 LoRA 加载 | 下拉选择 `lora_weights/` 中的权重，注入到卷积层，随时切换或卸载；不选则完全走原生基础模型 |
 | 🧪 LoRA 微调 | 独立「模型微调」Tab：自动退化生成 LR、只训练 LoRA 参数、训练中出验证预览图 + PSNR、断点续训、只导出 LoRA |
@@ -90,7 +90,7 @@ PhotoVideoAI-SR/
 │   └── selftest_e2e.py             # 端到端真机验收（需 CUDA + 权重；图片/视频/LoRA/微调/UI）
 ├── scripts/
 │   └── install.py                  # 一键安装脚本（处理 CUDA torch / basicsr / 镜像）
-├── temp/                           # 临时帧与音轨（任务结束自动清理）
+├── temp/                           # 临时音轨（管道式不落帧；文件式才有帧），任务结束自动清理
 ├── output/                         # 推理输出（batch/ 存放批量结果）
 ├── lora_weights/                   # LoRA 权重 *.pth / *.safetensors
 ├── model_weights/                  # 基础模型权重，如 RealESRGAN_x4plus.pth
@@ -119,6 +119,7 @@ PhotoVideoAI-SR/
 **可选**
 
 * `nvvfx`（NVIDIA Maxine VSR）：时序视频超分。未安装时 UI 自动隐藏该选项，主流程不受影响。
+  用 `python scripts/install.py --maxine` 一键安装（见下节第 6 步）。
 * `gfpgan`：老照片人脸修复。未安装时对应开关隐藏，需要额外的 `GFPGANv1.4.pth` 权重。
 
 > Windows 与 Linux 均可运行；Windows 用户请确认 `ffmpeg.exe` / `ffprobe.exe` 在 PATH 中。
@@ -221,8 +222,19 @@ python -c "import src.img_sr as m; print(m.HAS_REALESRGAN, m.REALESRGAN_IMPORT_E
 pip install gfpgan          # 人脸修复：光装库还不够，必须同时把 GFPGANv1.4.pth
                             # （约 350 MB）放进 model_weights/，否则 UI 不会显示开关
 pip install lpips           # 微调可选感知损失（首次使用会下载 VGG 权重约 500 MB）
-# Maxine VSR：按 NVIDIA 官方文档安装 nvvfx 相关组件
+
+# Maxine VSR 时序超分（可选，闭源）：推荐用一键安装脚本
+python scripts/install.py --maxine
+# 等价的手动命令（注意必须用 NVIDIA 的索引）：
+#   pip install nvidia-vfx --index-url https://pypi.nvidia.com
 ```
+
+> **Maxine 的两个坑**：
+> 1. PyPI 上的 `nvidia-vfx` 只是一个 **3.6 KB 的占位包**，装它得不到 `nvvfx`；
+>    真正的 wheel（约 400 MB，含 VFX 运行时）只发布在 `https://pypi.nvidia.com`。
+> 2. 对硬件有要求：带 Tensor Core 的 NVIDIA 显卡（Turing 及以上）、
+>    Windows 驱动 570.65+ / Linux 570.190+，Python 3.10+。
+>    装好后视频 Tab 会多出 `Maxine VSR` 选项，缺失时自动隐藏。
 
 > `safetensors` 已列为默认依赖（用于读取第三方 `.safetensors` LoRA），无需额外安装。
 > `scikit-image` **不是**本项目的依赖，它随 basicsr 一起装（见第 4.3 步）。
@@ -314,6 +326,32 @@ python app.py --allow-cpu                    # 无 CUDA 时也启动界面（仅
 
 > **Maxine VSR 不支持 LoRA**：它是闭源组件，模型参数不可训练；需要风格定制请使用 RealESRGAN 链路。
 
+**处理管线（性能）**
+
+默认走**管道式**：解码 → 推理 → 编码全程流式，帧直接以 `rawvideo` 在进程间传递，
+**不落任何中间 PNG**。相比旧的「先拆帧成 PNG → 逐帧读写 → 再合成」，省掉了每帧一次
+PNG 编码 + 落盘 + 读取 + 解码。
+
+实测（640×360 → 2560×1440，150 帧，RTX 4080 SUPER，FP16）：
+
+| 管线 | 耗时 | 每帧 | 吞吐 |
+| --- | --- | --- | --- |
+| 文件式（旧） | 84.6 s | 564 ms | 1.77 帧/s |
+| **管道式（默认）** | **52.9 s** | **353 ms** | **2.84 帧/s** |
+
+约 **1.6× 加速**、省 37% 时间；GPU 占用率从约 55% 提升到约 80%
+（剩下的开销主要来自超分网络本身的一次前向，实测 640×360 输入约 281 ms）。
+
+**Maxine 链路也走同一条管道**，收益更大（它单帧只要约 10 ms，PNG 往返本来是主要开销）：
+
+| 管线 | 50 帧耗时 | 吞吐 |
+| --- | --- | --- |
+| 文件式 | 7.88 s | 6.3 帧/s |
+| **管道式（默认）** | **2.14 s** | **23.4 帧/s** |
+
+管道式不可用时（异常、环境不支持）会**自动回退**到文件式，两者输出规格完全一致；
+想强制用旧管线对比或排查，设 `PVSR_VIDEO_PIPELINE=files`。
+
 ### 🧪 模型微调
 
 训练自定义 LoRA 的完整流程（数据准备 → 预览退化 → 开训 → 看验证图 → 导出 → 选用）
@@ -375,7 +413,7 @@ python app.py --allow-cpu                    # 无 CUDA 时也启动界面（仅
 | 可微调 | ✅ 支持训练并加载 LoRA 权重（见「微调」章节） | ❌ 不支持，参数不可见 |
 | 风格 | 细节锐利、纹理重建强，可针对素材微调 | 画面稳定、时序一致性好，风格固定 |
 | 输入 | 图片与视频通用，逐帧处理 | 视频专用，需按时间顺序喂帧 |
-| 依赖 | `realesrgan` / `basicsr` | `nvvfx`（可选，缺失自动隐藏） |
+| 依赖 | `realesrgan` / `basicsr` | `nvidia-vfx`（`scripts/install.py --maxine`，缺失自动隐藏） |
 | 适用场景 | 老照片、动漫、需要定制风格的素材 | 实时/准实时观看、追求画面稳定的视频 |
 
 选择建议：**要定制风格或处理图片 → RealESRGAN；只要视频更清晰稳定、且环境具备 nvvfx → Maxine。**
@@ -499,6 +537,7 @@ print(runner.status(), runner.result)
 | `PVSR_FFMPEG_URL` | 按平台自动选 | 自定义 FFmpeg 下载地址（内网镜像 / 代理） |
 | `PVSR_TOOLS_DIR` | 项目内 `tools/` | 项目自带工具的安装目录 |
 | `PVSR_FFMPEG_TIMEOUT` | 3600 | 单条 FFmpeg 命令超时（秒） |
+| `PVSR_VIDEO_PIPELINE` | `stream` | 视频处理管线：`stream`=管道式（默认，快约 1.6×）/ `files`=拆帧成 PNG 再合成（备用） |
 | `PVSR_TEMP_DIR` / `PVSR_OUTPUT_DIR` / `PVSR_LORA_DIR` / `PVSR_MODEL_DIR` / `PVSR_LOG_DIR` | 项目内目录 | 自定义各目录位置 |
 | `PVSR_HALF` | 1 | 默认是否半精度推理 |
 | `PVSR_KEEP_TEMP` | 0 | 1 = 保留临时文件 |
@@ -513,10 +552,11 @@ print(runner.status(), runner.result)
 ## 已知限制
 
 1. **仅支持 NVIDIA CUDA**：AMD / Apple Silicon / 纯 CPU 不在支持范围内；缺失 CUDA 时程序直接退出并提示。
-2. **Maxine 冒烟依赖官方 SDK**：未安装 `nvvfx` 时该链路不可用（UI 自动隐藏）；不同版本 API 存在差异，
-   程序做了兼容性检查，若你的版本报“会话创建失败”，请附版本信息到
-   [Issues](https://github.com/zjwan461/PhotoVideoAI-SR/issues) 反馈。
-3. **视频逐帧超分耗时与磁盘占用随帧数线性增长**：长视频建议先用预览模式确认参数。
+2. **Maxine 依赖可选闭源 SDK**：需单独安装 `nvidia-vfx`（`scripts/install.py --maxine`），
+   装好后链路才可用（缺失时 UI 自动隐藏）。本项目已按 nvidia-vfx **0.2.x 的 API**
+   （CUDA 张量 + DLPack 输出）适配；若你用的是更老的版本，程序会给出可读的版本提示。
+3. **视频超分耗时随帧数线性增长**：长视频建议先用预览模式确认参数。
+   磁盘占用已不是问题——默认的管道式管线不落中间帧文件（只在 `temp/` 暂存音轨）。
 4. **音轨处理**：源视频无音轨时输出为无声视频；MKV 下音频直接 `copy`，若源音频编码不被容器支持会失败。
 5. **LoRA 需要与基础模型结构匹配**：`rank` 从权重文件自动推断；匹配度低于 50% 时会拒绝加载并说明原因，
    而不是静默地只生效一部分。
