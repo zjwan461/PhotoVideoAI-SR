@@ -290,6 +290,30 @@ def test_encoders() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 4.5 FFmpeg 自动下载（只校验配置与短路逻辑，不联网）
+# --------------------------------------------------------------------------- #
+def test_ffmpeg_installer() -> None:
+    section("FFmpeg 自动下载（配置与幂等，不联网）")
+    from src import ffmpeg_installer as installer
+
+    check("平台可识别", installer.platform_key() in {"windows", "linux", "unsupported"},
+          installer.platform_key())
+    urls = installer.candidate_urls()
+    check("候选下载地址与平台一致",
+          bool(urls) == installer.is_supported(), f"{len(urls)} 个")
+    check("状态文案可生成", bool(installer.status_text()))
+    check("安装目录解析正确",
+          config.FFMPEG_BUNDLE_DIR.name == "ffmpeg", str(config.FFMPEG_BUNDLE_DIR))
+
+    if not config.ffmpeg_available():
+        skip("下载幂等性", "当前没有可用的 FFmpeg（真实下载需要联网，已跳过）")
+        return
+    # 已可用时 install() 必须直接短路，不能触发下载
+    first = installer.install()
+    check("已可用时 install() 幂等短路", first.is_file(), str(first))
+
+
+# --------------------------------------------------------------------------- #
 # 5. GPU 微调冒烟
 # --------------------------------------------------------------------------- #
 def test_training(device: str, work: Path) -> None:
@@ -366,13 +390,13 @@ def test_ui(device: str, work: Path) -> None:
         skip("WebUI", "未安装 Gradio")
         return
 
-    demo = app.build_demo()
-    check("build_demo 成功", demo is not None)
+    interface = app.build_interface()
+    check("build_interface 成功", interface is not None)
 
     # 反查事件绑定：处理器签名（去掉 progress）应与绑定的输入个数一致
     mismatches: list[str] = []
     checked = 0
-    for block_fn in demo.fns.values():
+    for block_fn in interface.fns.values():
         fn = getattr(block_fn, "fn", None)
         if not callable(fn):
             continue
@@ -416,6 +440,14 @@ def test_ui(device: str, work: Path) -> None:
         paths, _note = app.handle_preview_degradation(None, str(data_dir), 128, 4, 2, 0)
         check("退化预览生成 2 组", len(paths) == 2, f"{len(paths)} 组")
 
+    # 「下载 FFmpeg」按钮：已可用时必须短路（不联网），且返回个数要与界面接线一致
+    result = app.handle_install_ffmpeg(progress=PlainProgress())
+    check("下载 FFmpeg 处理器返回 4 个输出（与接线一致）",
+          isinstance(result, tuple) and len(result) == 4,
+          f"{len(result)} 个输出" if isinstance(result, tuple) else type(result).__name__)
+    if isinstance(result, tuple) and result:
+        check("FFmpeg 已可用时不重复下载", "无需重复下载" in str(result[0]))
+
 
 # --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> int:
@@ -453,6 +485,7 @@ def main(argv: list[str] | None = None) -> int:
         test_lora(device)
         test_video(device, work)
         test_encoders()
+        test_ffmpeg_installer()
         if args.skip_train:
             skip("LoRA 微调", "--skip-train")
         else:

@@ -28,6 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import config  # noqa: E402
 from src import (  # noqa: E402
     enhance_extras,  # noqa: E402
+    ffmpeg_installer,
     ffmpeg_utils,
     img_sr,
 )
@@ -95,7 +96,14 @@ def safe_handler(task_name: str):
                 return func(*args, **kwargs)
             except gr.Error:
                 raise
-            except (img_sr.ImageSRError, rr_mod.VideoSRError, maxine_mod.MaxineError, ffmpeg_utils.FFmpegError) as exc:
+            except (
+                img_sr.ImageSRError,
+                rr_mod.VideoSRError,
+                maxine_mod.MaxineError,
+                ffmpeg_utils.FFmpegError,
+                ffmpeg_installer.FFmpegInstallError,
+            ) as exc:
+                # 这些异常的 message 已经是面向用户的文案，原样展示
                 log_exception(task_name, exc)
                 raise gr.Error(str(exc)) from None
             except RuntimeError as exc:
@@ -143,6 +151,11 @@ def environment_markdown() -> str:
     return "```\n" + config.runtime_summary() + "\n```"
 
 
+def encoder_markdown() -> str:
+    """编码器可用性面板内容。"""
+    return "```\n" + ffmpeg_utils.probe_encoder_support() + "\n```"
+
+
 def lora_markdown() -> str:
     """LoRA 列表面板内容。"""
     items = scan_lora_weights()
@@ -159,6 +172,39 @@ def lora_markdown() -> str:
 def refresh_lora_choices():
     """刷新各 Tab 的 LoRA 下拉框选项。"""
     return gr.update(choices=lora_choices(), value=NO_LORA)
+
+
+@safe_handler("下载 FFmpeg")
+def handle_install_ffmpeg(progress=gr.Progress()):
+    """下载 FFmpeg 到项目内并立即接管（无需重启、无需配置 PATH）。
+
+    给没有预装 FFmpeg 的用户准备的兜底：成功后 ``config.FFMPEG_BIN`` 会指向
+    项目内 ``tools/ffmpeg/`` 里的可执行文件，视频链路马上可用。
+    """
+    from src import ffmpeg_installer
+
+    if config.ffmpeg_available():
+        return (
+            ffmpeg_installer.status_text() + "\n\n无需重复下载。",
+            ffmpeg_installer.status_text(),
+            environment_markdown(),
+            encoder_markdown(),
+        )
+
+    path = ffmpeg_installer.install(
+        progress=lambda value, message: progress(value, desc=message)
+    )
+    note = (
+        f"✅ FFmpeg 已安装到项目内：`{path}`\n\n"
+        "后续任务会直接使用它，**无需重启、也无需修改系统 PATH**。\n\n"
+        f"如想改用系统自带的 FFmpeg，删掉 `{config.FFMPEG_BUNDLE_DIR}` 即可恢复为从 PATH 查找。"
+    )
+    return (
+        note,
+        ffmpeg_installer.status_text(),
+        environment_markdown(),
+        encoder_markdown(),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -690,8 +736,8 @@ def gradio_major_version() -> int:
         return 4
 
 
-def build_demo():
-    """构建 Gradio 界面。"""
+def build_interface() -> gr.Blocks:
+    """组装 Gradio 界面（Blocks 组件树），供 :func:`main` 启动。"""
     if not HAS_GRADIO:
         raise SystemExit(
             "未安装 Gradio，无法启动 WebUI。\n"
@@ -710,7 +756,7 @@ def build_demo():
     if not style_in_launch:
         blocks_kwargs.update({"css": CSS, "theme": gr.themes.Soft()})
 
-    with gr.Blocks(**blocks_kwargs) as demo:
+    with gr.Blocks(**blocks_kwargs) as interface:
         gr.Markdown("# PhotoVideoAI-SR\n图片 / 视频 AI 超分（NVIDIA CUDA + FFmpeg）", elem_classes="sr-title")
         gr.Markdown(
             "本地运行 · 不上传云端 · MIT 开源。RealESRGAN 负责图片与逐帧视频超分（支持 LoRA 自定义），"
@@ -984,8 +1030,17 @@ def build_demo():
             with gr.Tab("🩺 环境与 LoRA"):
                 gr.Markdown("### 运行环境")
                 env_md = gr.Markdown(environment_markdown())
+                gr.Markdown("### FFmpeg")
+                ffmpeg_md = gr.Markdown(ffmpeg_installer.status_text())
+                with gr.Row():
+                    install_ffmpeg_btn = gr.Button("⬇️ 下载 FFmpeg", variant="secondary")
+                gr.Markdown(
+                    "<sub>没有预装 FFmpeg 时用它一键装到项目内 `tools/ffmpeg/`："
+                    "不需要管理员权限，也不会改系统 PATH。</sub>"
+                )
+                ffmpeg_note = gr.Markdown("")
                 gr.Markdown("### 编码器")
-                encoder_md = gr.Markdown("```\n" + ffmpeg_utils.probe_encoder_support() + "\n```")
+                encoder_md = gr.Markdown(encoder_markdown())
                 gr.Markdown("### 可选组件")
                 gr.Markdown(maxine_mod.maxine_status())
                 with gr.Row():
@@ -994,10 +1049,14 @@ def build_demo():
                 gr.Markdown("### LoRA 权重目录")
                 lora_md = gr.Markdown(lora_markdown())
 
+                install_ffmpeg_btn.click(
+                    handle_install_ffmpeg,
+                    outputs=[ffmpeg_note, ffmpeg_md, env_md, encoder_md],
+                )
                 refresh_env_btn.click(
-                    lambda: (environment_markdown(),
-                             "```\n" + ffmpeg_utils.probe_encoder_support() + "\n```"),
-                    outputs=[env_md, encoder_md],
+                    lambda: (environment_markdown(), encoder_markdown(),
+                             ffmpeg_installer.status_text()),
+                    outputs=[env_md, encoder_md, ffmpeg_md],
                 )
                 refresh_lora_btn.click(
                     lambda: (lora_markdown(), refresh_lora_choices(), refresh_lora_choices()),
@@ -1009,7 +1068,7 @@ def build_demo():
             "推理产物保存在 `output/`，临时帧与音轨保存在 `temp/` 并在任务结束后自动清理。"
         )
 
-    return demo
+    return interface
 
 
 # --------------------------------------------------------------------------- #
@@ -1049,8 +1108,8 @@ def main(argv: list[str] | None = None) -> int:
     if not config.ffmpeg_available():
         logger.warning(ffmpeg_utils.check_ffmpeg())
 
-    demo = build_demo()
-    demo.queue(default_concurrency_limit=4)
+    interface = build_interface()
+    interface.queue(default_concurrency_limit=4)
 
     # 尽力打开输出目录，方便用户取用结果
     try:
@@ -1068,7 +1127,7 @@ def main(argv: list[str] | None = None) -> int:
     if gradio_major_version() >= 6:
         launch_kwargs.update({"css": CSS, "theme": gr.themes.Soft()})
 
-    demo.launch(**launch_kwargs)
+    interface.launch(**launch_kwargs)
     return 0
 
 

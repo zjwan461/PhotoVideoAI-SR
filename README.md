@@ -1,5 +1,7 @@
 # PhotoVideoAI-SR
 
+**语言 / Language**：**中文** · [English](README_EN.md)
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![CUDA](https://img.shields.io/badge/CUDA-NVIDIA-green.svg)](https://developer.nvidia.com/cuda-toolkit)
@@ -90,6 +92,7 @@ PhotoVideoAI-SR/
 ├── output/                         # 推理输出（batch/ 存放批量结果）
 ├── lora_weights/                   # LoRA 权重 *.pth / *.safetensors
 ├── model_weights/                  # 基础模型权重，如 RealESRGAN_x4plus.pth
+├── tools/                          # 运行时下载的工具（界面里一键装的 FFmpeg）
 └── logs/                           # 运行日志（每次启动一个带时间戳的文件）
 ```
 
@@ -203,6 +206,12 @@ python -c "import src.img_sr as m; print(m.HAS_REALESRGAN, m.REALESRGAN_IMPORT_E
 * 验证：`ffmpeg -version` 与 `ffprobe -version` 都能输出
 * 版本：FFmpeg 4.x ~ 9.x 均可。程序会探测版本自动选用 `-vsync 0` 或
   `-fps_mode passthrough`（`-vsync` 在 FFmpeg 9 已被移除）
+
+> **不想手动装？** 启动 WebUI 后进入「🩺 环境与 LoRA」Tab，点 **⬇️ 下载 FFmpeg**：
+> 程序会自动下载预编译包到项目内 `tools/ffmpeg/`（Windows 约 190 MB，解压后约 340 MB；
+> Linux 约 40 MB），完成后立即生效——**不需要管理员权限，也不用改系统 PATH**，
+> 连程序都不用重启。下载源按顺序自动回退，连续 20 秒低于 64 KB/s 会切换到下一个源；
+> 内网环境可用 `PVSR_FFMPEG_URL` 指定镜像地址。
 
 ### 6. 安装可选依赖（按需）
 
@@ -460,7 +469,9 @@ print(runner.status(), runner.result)
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `PVSR_FFMPEG` / `PVSR_FFPROBE` | `ffmpeg` / `ffprobe` | 可执行文件路径 |
+| `PVSR_FFMPEG` / `PVSR_FFPROBE` | `ffmpeg` / `ffprobe` | 可执行文件路径（优先级最高，会盖过项目内自带的 FFmpeg） |
+| `PVSR_FFMPEG_URL` | 按平台自动选 | 自定义 FFmpeg 下载地址（内网镜像 / 代理） |
+| `PVSR_TOOLS_DIR` | 项目内 `tools/` | 项目自带工具的安装目录 |
 | `PVSR_FFMPEG_TIMEOUT` | 3600 | 单条 FFmpeg 命令超时（秒） |
 | `PVSR_TEMP_DIR` / `PVSR_OUTPUT_DIR` / `PVSR_LORA_DIR` / `PVSR_MODEL_DIR` / `PVSR_LOG_DIR` | 项目内目录 | 自定义各目录位置 |
 | `PVSR_HALF` | 1 | 默认是否半精度推理 |
@@ -504,8 +515,22 @@ A：先跑 `python -c "import torch; print(torch.cuda.is_available())"`。为 `F
 A：关闭其它占显存的程序；把 tile 调小（如 200）；关闭半精度或降低输出分辨率；视频任务先开预览模式。
 
 **Q：提示找不到 FFmpeg。**
-A：安装 FFmpeg 并确保 `ffmpeg`、`ffprobe` 在 PATH 中，或设置 `PVSR_FFMPEG` / `PVSR_FFPROBE` 指向绝对路径；
-界面的「环境与 LoRA」Tab 可以查看实时状态。
+A：最省事的做法是启动 WebUI，在「🩺 环境与 LoRA」Tab 点 **⬇️ 下载 FFmpeg**，
+程序会自动装到项目内 `tools/ffmpeg/` 并立即生效（无需管理员权限、不用改 PATH）。
+也可以自己安装 FFmpeg 并确保 `ffmpeg`、`ffprobe` 在 PATH 中，
+或设置 `PVSR_FFMPEG` / `PVSR_FFPROBE` 指向绝对路径。
+优先级：环境变量 > 项目内自带 > PATH；删掉 `tools/ffmpeg/` 即可退回使用系统自带版本。
+
+**Q：点「下载 FFmpeg」失败 / 一直很慢。**
+A：程序会按顺序尝试多个下载源，连续 20 秒低于 64 KB/s 会自动换下一个源。
+如果全都不通（常见于受限网络），可用 `PVSR_FFMPEG_URL` 指向内网镜像或可访问的地址，例如：
+
+```bash
+set PVSR_FFMPEG_URL=https://your-mirror/ffmpeg-release-essentials.zip   # Windows
+export PVSR_FFMPEG_URL=https://your-mirror/ffmpeg-release-essentials.zip # Linux
+```
+
+也可以直接手工下载后解压，把 `ffmpeg(.exe)` / `ffprobe(.exe)` 放进 `tools/ffmpeg/`。
 
 **Q：导入 `realesrgan` 报 `No module named 'torchvision.transforms.functional_tensor'`。**
 A：这**不是**没装 basicsr，而是 torchvision ≥ 0.17 删掉了该子模块，而 `basicsr 1.4.2`

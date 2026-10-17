@@ -45,11 +45,48 @@ ensure_dirs()
 # --------------------------------------------------------------------------- #
 # FFmpeg / FFprobe
 # --------------------------------------------------------------------------- #
-#: 可执行文件路径，默认走 PATH；可用环境变量指定绝对路径
-FFMPEG_BIN: str = os.environ.get("PVSR_FFMPEG", "ffmpeg")
-FFPROBE_BIN: str = os.environ.get("PVSR_FFPROBE", "ffprobe")
+#: 项目内自带的工具目录（运行时下载，不进版本库）
+TOOLS_DIR: Path = Path(os.environ.get("PVSR_TOOLS_DIR", PROJECT_ROOT / "tools"))
 
-#: 单条 ffmpeg 命令的超时（秒），防止损坏文件导致进程挂死
+#: 自带 FFmpeg 的安装目录
+FFMPEG_BUNDLE_DIR: Path = TOOLS_DIR / "ffmpeg"
+
+
+def bundled_ffmpeg_bin(name: str) -> Path:
+    """返回项目内自带 FFmpeg 可执行文件路径（未下载时该文件不存在）。"""
+    return FFMPEG_BUNDLE_DIR / (f"{name}.exe" if os.name == "nt" else name)
+
+
+def _resolve_ffmpeg_bin(env_var: str, name: str) -> str:
+    """决定用哪个 ffmpeg/ffprobe：环境变量 > 项目内自带 > PATH。"""
+    override = os.environ.get(env_var)
+    if override:
+        return override
+    bundled = bundled_ffmpeg_bin(name)
+    if bundled.is_file():
+        return str(bundled)
+    return name
+
+
+#: 可执行文件路径：默认走 PATH；装了项目内自带版本后自动指向它；
+#: 也可用环境变量指定绝对路径（优先级最高）
+FFMPEG_BIN: str = _resolve_ffmpeg_bin("PVSR_FFMPEG", "ffmpeg")
+FFPROBE_BIN: str = _resolve_ffmpeg_bin("PVSR_FFPROBE", "ffprobe")
+
+
+def refresh_ffmpeg_bins() -> tuple[str, str]:
+    """重新解析 ffmpeg/ffprobe 路径。
+
+    下载或删除项目内自带版本后调用，让 ``FFMPEG_BIN`` / ``FFPROBE_BIN`` 立刻生效
+    （``src.ffmpeg_utils`` 每次调用都会读取这两个模块级变量，因此无需重启）。
+    """
+    global FFMPEG_BIN, FFPROBE_BIN
+    FFMPEG_BIN = _resolve_ffmpeg_bin("PVSR_FFMPEG", "ffmpeg")
+    FFPROBE_BIN = _resolve_ffmpeg_bin("PVSR_FFPROBE", "ffprobe")
+    return FFMPEG_BIN, FFPROBE_BIN
+
+
+#: 单条 ffmpeg 命令的超时（秒），防止损坏文件导致命令挂死
 FFMPEG_TIMEOUT: int = int(os.environ.get("PVSR_FFMPEG_TIMEOUT", "3600"))
 
 # --------------------------------------------------------------------------- #
@@ -304,7 +341,9 @@ def ffmpeg_diagnosis() -> str:
     return (
         "❌ 未找到可执行文件: "
         + ", ".join(missing)
-        + "\n请安装 FFmpeg 并加入 PATH，或用环境变量 PVSR_FFMPEG / PVSR_FFPROBE 指定绝对路径。"
+        + "\n可在「🩺 环境与 LoRA」Tab 点「⬇️ 下载 FFmpeg」，程序会自动下载到项目内"
+        f"\n（{FFMPEG_BUNDLE_DIR}）并立即使用，无需管理员权限、也不用改系统 PATH。"
+        "\n也可以自行安装 FFmpeg 并加入 PATH，或用环境变量 PVSR_FFMPEG / PVSR_FFPROBE 指定绝对路径。"
     )
 
 

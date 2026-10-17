@@ -157,6 +157,15 @@ _PROBE_WIDTH = 320
 _PROBE_HEIGHT = 240
 
 
+def reset_encoder_cache() -> None:
+    """清空编码器能力判定缓存。
+
+    换了 FFmpeg 可执行文件（例如刚下载了项目内自带版本）之后调用，
+    否则会沿用旧二进制的判定结果。
+    """
+    _NVENC_CACHE.clear()
+
+
 def has_nvenc(codec: str = "h264_nvenc") -> bool:
     """检测硬件编码器是否**真正可用**（结果缓存）。
 
@@ -594,6 +603,9 @@ __all__ = [
     "mux_audio",
     "concat_videos",
     "probe_encoder_support",
+    "reset_encoder_cache",
+    "ffmpeg_version",
+    "passthrough_args",
     "FRAME_PATTERN",
     "FRAME_GLOB",
 ]

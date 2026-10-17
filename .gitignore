@@ -30,6 +30,9 @@ lora_weights/*
 *.safetensors
 *.ckpt
 
+# ---- 运行时下载的工具（如界面里一键下载的 FFmpeg）----
+tools/
+
 # ---- 编辑器 / 系统 ----
 .vscode/
 .idea/
