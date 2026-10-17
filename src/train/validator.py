@@ -96,6 +96,7 @@ def network_inference(network, image_rgb, *, device: str = "cuda:0", max_pixels:
         raise ValidatorError("验证输入为空。")
 
     image = image_rgb
+    device = config.normalize_device(device)
     height, width = image.shape[:2]
     if height * width > max_pixels:
         scale = (max_pixels / float(height * width)) ** 0.5

@@ -1,56 +1,19 @@
-# =============================================================================
-# PhotoVideoAI-SR 依赖列表
+# PhotoVideoAI-SR runtime dependencies.
 #
-# 安装顺序建议：
-#   1) 先按 https://pytorch.org 的说明安装与本机 CUDA 匹配的 PyTorch
-#      （务必选择 CUDA 版本，否则 torch.cuda.is_available() 为 False，程序无法推理）
-#   2) 再执行：pip install -r requirements.txt
+# PyTorch must be the CUDA build, and basicsr/realesrgan need special flags,
+# so all three are installed separately - see README "安装" section, or just run:
+#     python scripts/install.py
 #
-# 标记说明：
-#   [核心]     运行图片/视频超分所必需
-#   [可选]     缺少时程序仍可正常启动，相关功能自动隐藏或降级
-#   [开发/P2]  仅微调模块或开发调试需要
-# =============================================================================
+# Keep this file installable with plain `pip install -r requirements.txt`.
 
-# ----------------------------- [核心] 推理框架 ------------------------------
-# 注意：下面两行只是占位下限，实际请优先使用 PyTorch 官方源安装与驱动匹配的版本：
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-torch>=2.1
-torchvision>=0.16
-
-# ----------------------------- [核心] 图像与数值 ----------------------------
-# numpy 固定 <2.0：basicsr / realesrgan 尚未完全适配 numpy 2.x 的 ABI 变更
-numpy>=1.24,<2.0
+numpy>=1.24
 opencv-python>=4.8
 Pillow>=10.0
-
-# ----------------------------- [核心] 超分模型 ------------------------------
-realesrgan==0.3.0
-basicsr==1.4.2
-
-# ----------------------------- [核心] WebUI ---------------------------------
 gradio>=4.44,<6.0
-
-# ----------------------------- [核心] 其它 ----------------------------------
 tqdm>=4.66
 
-# ----------------------------- [可选] 人脸修复（老照片附加功能） -------------
-# 安装后 UI 会自动出现「人脸修复 (GFPGAN)」开关；未安装时该开关隐藏。
-# 需要额外下载 GFPGANv1.4.pth 到 model_weights/（见 README）。
-# gfpgan>=1.3.8
-
-# ----------------------------- [可选] NVIDIA Maxine VSR ---------------------
-# 时序视频超分组件，闭源、不支持 LoRA 微调。
-# 需按 NVIDIA 官方文档获取 SDK 与运行时（包名随官方发布方式变化，常见为 nvvfx）。
-# 未安装时程序自动隐藏 Maxine 选项，主流程不受影响。
-# nvidia-nvfx
-
-# ----------------------------- [可选] LoRA 权重格式 -------------------------
-# 支持读取 .safetensors 格式的 LoRA 权重（.pth 不需要该依赖）。
-# safetensors>=0.4.0
-
-# ----------------------------- [开发/P2] 微调模块 ---------------------------
-# 仅 LoRA 微调（P2）与开发调试需要；主推理链路不依赖。
-# lpips>=0.1.4          # 感知损失
-# scikit-image>=0.22    # 退化管线中的额外算子
-# pytest>=8.0           # 单元测试
+# Optional extras - uncomment what you need.
+# gfpgan>=1.3.8          # face restore, also requires GFPGANv1.4.pth in model_weights/
+# safetensors>=0.4.0     # read/write .safetensors LoRA files
+# lpips>=0.1.4           # perceptual loss for LoRA fine-tuning
+# scikit-image>=0.22     # extra ops in the degradation pipeline

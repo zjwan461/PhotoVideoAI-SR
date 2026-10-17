@@ -111,17 +111,25 @@ def require_cuda(exit_on_failure: bool = False) -> bool:
 
 
 def get_device_summary(device: str = "cuda:0") -> str:
-    """返回单行设备描述，用于日志/UI（避免硬编码任何型号）。"""
+    """返回单行设备描述，用于日志/UI（避免硬编码任何型号）。
+
+    接受 UI 下拉标签（``"cuda:0 | <名称> (32 GB, sm_89)"``）或 ``cuda:N`` /
+    ``cpu``；内部先归一化再拼装，避免把标签原样拼进日志。
+    """
+    normalized = config.normalize_device(device)
     try:
         import torch
 
-        if device.startswith("cuda") and torch.cuda.is_available():
-            index = int(device.split(":", 1)[1]) if ":" in device else 0
+        if normalized.startswith("cuda") and torch.cuda.is_available():
+            index = config.gpu_index_from_option(normalized)
             props = torch.cuda.get_device_properties(index)
-            return f"{device} | {getattr(props, 'name', 'CUDA')} ({round(props.total_memory / 1024**3, 1)} GB)"
+            return (
+                f"{normalized} | {getattr(props, 'name', 'CUDA')} "
+                f"({round(props.total_memory / 1024**3, 1)} GB)"
+            )
     except Exception:
         pass
-    return device
+    return normalized
 
 
 def get_free_vram_gb(device_index: int = 0) -> float | None:

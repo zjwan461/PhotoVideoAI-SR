@@ -11,13 +11,14 @@
 ## 二、环境准备
 
 ```bash
-git clone <your-fork-url>
+git clone https://github.com/zjwan461/PhotoVideoAI-SR.git   # 或你 fork 的地址
 cd PhotoVideoAI-SR
 python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-pip install -r requirements.txt
+python scripts/install.py                             # 一键装齐（含 CUDA 版 PyTorch）
 python app.py
 ```
+
+手工安装见 README「安装」章节第 4 步；国内网络可用 `python scripts/install.py --mirror cn`。
 
 * 只支持 NVIDIA CUDA 推理；没有可用 CUDA 时程序会直接退出并提示（可用 `--allow-cpu`
   仅用于界面调试，推理必然失败）。
@@ -47,10 +48,11 @@ python app.py
 * 提交前至少执行：
 
 ```bash
-python -m compileall app.py config.py src tests
+python -m compileall app.py config.py src tests scripts
 python -c "import config, src.common, src.ffmpeg_utils, src.img_sr"
 python tests/selftest.py            # 基础链路自测
 python tests/selftest_train.py      # 微调链路自测（CPU 可跑）
+python tests/selftest_e2e.py        # 端到端真机验收（需 CUDA + 权重；缺条件会自动跳过）
 ```
 
 ## 五、提交 PR 的流程
@@ -75,3 +77,9 @@ python tests/selftest_train.py      # 微调链路自测（CPU 可跑）
 * P2（已完成）：RealESRGAN 卷积 LoRA 微调 —— 手写 LoRA（`src/train/lora_network.py`）、
   数据集退化管线（`dataset.py`）、训练循环与断点续训（`trainer.py`）、训练中验证预览（`validator.py`）、
   WebUI「🧪 模型微调」Tab。欢迎继续改进：多卡训练、更丰富的退化算子、导出合并权重等。
+* P3（已完成）：真机可用性修复与端到端验收。已修掉四类「导入没问题、一点按钮就崩」的缺陷：
+  torchvision ≥ 0.17 删除 `transforms.functional_tensor` 导致 `import realesrgan` 失败
+  （`src/torchvision_compat.py`）、FFmpeg 9 移除 `-vsync`（改为按版本探测 `-fps_mode`）、
+  LoRA 与 FP16 主干的 dtype 不一致、UI 设备下拉标签被原样传给 torch
+  （`config.normalize_device`）；并把视频任务的临时目录清理改为只清自己的子目录（并发安全）。
+  对应验收脚本：`tests/selftest_e2e.py`。

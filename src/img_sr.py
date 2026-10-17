@@ -59,6 +59,13 @@ except Exception:  # pragma: no cover
     torch = None  # type: ignore[assignment]
     HAS_TORCH = False
 
+# basicsr 1.4.2 在模块顶层导入 torchvision.transforms.functional_tensor，
+# 而该子模块自 torchvision 0.17 起已被移除。这里先装兼容垫片再导入，
+# 否则 realesrgan 会因连带导入 basicsr.data.degradations 而直接 ImportError。
+from src.torchvision_compat import ensure_functional_tensor  # noqa: E402
+
+TORCHVISION_COMPAT_ERROR = ensure_functional_tensor()
+
 try:
     from basicsr.archs.rrdbnet_arch import RRDBNet
     from realesrgan import RealESRGANer
@@ -70,6 +77,24 @@ except Exception as exc:  # pragma: no cover - 依赖缺失
     RealESRGANer = None  # type: ignore[assignment]
     HAS_REALESRGAN = False
     REALESRGAN_IMPORT_ERROR = str(exc)
+
+
+def realesrgan_import_hint() -> str:
+    """拼装 realesrgan / basicsr 导入失败时的面向用户提示。"""
+    detail = REALESRGAN_IMPORT_ERROR or "未知"
+    message = (
+        "未安装 RealESRGAN 推理依赖（realesrgan / basicsr）。\n"
+        "请执行：pip install -r requirements.txt\n"
+        f"导入错误：{detail}"
+    )
+    if "functional_tensor" in detail:
+        message += (
+            "\n\n检测到 torchvision 版本过新：basicsr 1.4.2 仍在导入已被移除的 "
+            "torchvision.transforms.functional_tensor。\n"
+            "本项目已尝试注册兼容垫片，但未成功："
+            f"{TORCHVISION_COMPAT_ERROR or '（无详细信息）'}"
+        )
+    return message
 
 
 class ImageSRError(RuntimeError):
@@ -200,11 +225,7 @@ def build_network(model_name: str = config.DEFAULT_MODEL_NAME, *, num_block: int
         num_block: 手动覆盖块数（自测/小模型实验用）。
     """
     if not HAS_REALESRGAN:
-        raise ImageSRError(
-            "未安装 RealESRGAN 推理依赖（realesrgan / basicsr）。\n"
-            "请执行：pip install -r requirements.txt\n"
-            f"导入错误：{REALESRGAN_IMPORT_ERROR or '未知'}"
-        )
+        raise ImageSRError(realesrgan_import_hint())
     scale = model_scale(model_name)
     blocks = model_num_block(model_name) if num_block is None else int(num_block)
     try:
@@ -398,13 +419,13 @@ class RealESRGANEngine:
     ) -> RealESRGANEngine:
         """加载（或复用）基础模型，并按需注入 LoRA。"""
         if not HAS_REALESRGAN:
-            raise ImageSRError(
-                "未安装 RealESRGAN 推理依赖（realesrgan / basicsr）。\n"
-                "请执行：pip install -r requirements.txt\n"
-                f"导入错误：{REALESRGAN_IMPORT_ERROR or '未知'}"
-            )
+            raise ImageSRError(realesrgan_import_hint())
         if not HAS_TORCH:
             raise ImageSRError("未安装 PyTorch，请先安装 CUDA 版 PyTorch。")
+
+        # device 可能直接来自 UI 下拉标签（"cuda:0 | <名称> (32 GB, sm_89)"），
+        # 必须先归一化，否则交给 torch / RealESRGANer 会报 Invalid device string。
+        device = config.normalize_device(device)
 
         half = config.HALF_PRECISION if half is None else bool(half)
         device_index = config.gpu_index_from_option(device)
@@ -613,6 +634,7 @@ class FaceRestorer:
     """GFPGAN 封装（可选依赖，缺库时 UI 会自动隐藏开关）。"""
 
     def __init__(self, device: str = "cuda:0", upscale: int = 2):
+        device = config.normalize_device(device)
         try:
             from gfpgan import GFPGANer
         except Exception as exc:  # noqa: BLE001
@@ -620,7 +642,7 @@ class FaceRestorer:
                 "未安装 GFPGAN。可选依赖安装方式：pip install gfpgan\n"
                 f"导入错误：{exc}"
             ) from exc
-        weights = config.MODEL_DIR / "GFPGANv1.4.pth"
+        weights = config.gfpgan_weights_path()
         if not weights.is_file():
             raise ImageSRError(
                 f"缺少人脸修复权重：{weights}\n下载地址：{config.GFPGAN_MODEL_URL}"
@@ -687,6 +709,7 @@ def upscale_image(
         ``(result_rgb, info)``，info 含耗时、输入输出尺寸、模型与 LoRA 信息。
     """
     _import_numpy()
+    device = config.normalize_device(device)
     started = time.time()
     target_long_edge = resolve_target_long_edge(preset_name)
 

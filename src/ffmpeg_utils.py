@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from collections.abc import Iterable, Sequence
@@ -106,7 +107,54 @@ def ensure_ffmpeg() -> None:
         raise FFmpegError(config.ffmpeg_diagnosis())
 
 
+# --------------------------------------------------------------------------- #
+# 版本探测与「帧率透传」参数
+# --------------------------------------------------------------------------- #
+_FFMPEG_VERSION: tuple[int, int] | None = None
+
+
+def ffmpeg_version() -> tuple[int, int] | None:
+    """探测 FFmpeg 版本，返回 ``(主, 次)``；探测失败返回 None（结果缓存）。"""
+    global _FFMPEG_VERSION
+    if _FFMPEG_VERSION is not None:
+        return _FFMPEG_VERSION
+    try:
+        completed = run_ffmpeg(["-hide_banner", "-version"], check=False, timeout=30)
+    except FFmpegError:
+        return None
+    text = (completed.stdout or "") + (completed.stderr or "")
+    match = re.search(r"ffmpeg version\s+n?(\d+)\.(\d+)", text)
+    if match:
+        _FFMPEG_VERSION = (int(match.group(1)), int(match.group(2)))
+    return _FFMPEG_VERSION
+
+
+def passthrough_args(*, legacy: bool | None = None) -> list[str]:
+    """返回「按源帧率透传、不做补帧/丢帧」的参数。
+
+    FFmpeg 5.1 起用 ``-fps_mode passthrough`` 取代 ``-vsync 0``，而 ``-vsync``
+    在较新版本中已被彻底移除（实测 FFmpeg 9.0 直接报
+    ``Unrecognized option 'vsync'``）。这里按版本选择写法：
+
+    * 主版本 >= 7：``-fps_mode passthrough``
+    * 更早或版本未知：``-vsync 0``（调用方另有运行期回退）
+
+    Args:
+        legacy: 强制指定写法（True = ``-vsync``，False = ``-fps_mode``）；
+            None 表示按探测到的版本自动选择。
+    """
+    if legacy is None:
+        version = ffmpeg_version()
+        legacy = bool(version and version[0] < 7)
+    return ["-vsync", "0"] if legacy else ["-fps_mode", "passthrough"]
+
+
 _NVENC_CACHE: dict[str, bool] = {}
+
+#: NVENC 能力探测用的帧尺寸。必须明显大于 NVENC 的最小支持尺寸
+#: （H.264 约 145x49），否则可用显卡会被误判为不可用。
+_PROBE_WIDTH = 320
+_PROBE_HEIGHT = 240
 
 
 def has_nvenc(codec: str = "h264_nvenc") -> bool:
@@ -115,6 +163,11 @@ def has_nvenc(codec: str = "h264_nvenc") -> bool:
     仅出现在 ``-encoders`` 列表里并不代表能跑：驱动缺失或运行时不匹配时，
     初始化会在实际编码时失败。这里做一次 1 帧的极小编码测试，
     不通过就让调用方回退到软件编码。
+
+    注意：探测帧尺寸不能太小。NVENC 对输入尺寸有下限（H.264 约 145x49），
+    用 64x64 之类的尺寸会让编码器以 ``Frame Dimension less than the minimum
+    supported value`` 失败，从而把「完全可用的显卡」误判成不可用。
+    因此这里用 320x240，并带上真实链路同样的 ``-pix_fmt yuv420p``。
     """
     if codec in _NVENC_CACHE:
         return _NVENC_CACHE[codec]
@@ -132,8 +185,8 @@ def has_nvenc(codec: str = "h264_nvenc") -> bool:
             probe = run_ffmpeg(
                 [
                     "-hide_banner", "-nostdin", "-v", "error",
-                    "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.04:r=25",
-                    "-frames:v", "1", "-c:v", codec, "-f", "null", "-",
+                    "-f", "lavfi", "-i", f"color=c=black:s={_PROBE_WIDTH}x{_PROBE_HEIGHT}:d=0.04:r=25",
+                    "-frames:v", "1", "-c:v", codec, "-pix_fmt", "yuv420p", "-f", "null", "-",
                 ],
                 check=False,
                 timeout=120,
@@ -301,19 +354,34 @@ def extract_frames(
 
     extension = "jpg" if image_format.upper() == "JPG" else "png"
     pattern = f"frame_%08d.{extension}"
-    args: list[str] = ["-hide_banner", "-nostdin", "-y"]
+    base_args: list[str] = ["-hide_banner", "-nostdin", "-y"]
     if start_time:
-        args += ["-ss", f"{float(start_time):.3f}"]
-    args += ["-i", str(source)]
+        base_args += ["-ss", f"{float(start_time):.3f}"]
+    base_args += ["-i", str(source)]
     if fps:
-        args += ["-vf", f"fps={float(fps):.6f}"]
+        base_args += ["-vf", f"fps={float(fps):.6f}"]
     if max_frames:
-        args += ["-frames:v", str(int(max_frames))]
+        base_args += ["-frames:v", str(int(max_frames))]
     if extension == "jpg":
-        args += ["-q:v", "2"]
-    args += ["-vsync", "0", str(target_dir / pattern)]
+        base_args += ["-q:v", "2"]
+    output = str(target_dir / pattern)
 
-    run_ffmpeg(args)
+    def _build(mode_args: Sequence[str]) -> list[str]:
+        return [*base_args, *mode_args, output]
+
+    preferred = passthrough_args()
+    try:
+        run_ffmpeg(_build(preferred))
+    except FFmpegError as exc:
+        # 版本探测可能不准（自定义构建 / 包装脚本），这里做一次运行期回退：
+        # 只要报的是「不认识这个选项」，就换另一种帧率透传写法重试。
+        if "Unrecognized option" not in str(exc):
+            raise
+        fallback = passthrough_args(legacy=(preferred[0] == "-fps_mode"))
+        logger.warning(
+            "当前 FFmpeg 不支持 %s，改用 %s 重试拆帧。", preferred[0], fallback[0]
+        )
+        run_ffmpeg(_build(fallback))
 
     frames = sorted(target_dir.glob(f"frame_*.{extension}"))
     if not frames:

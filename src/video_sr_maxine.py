@@ -23,7 +23,6 @@ from pathlib import Path
 import config
 from src import ffmpeg_utils, img_sr
 from src.common import (
-    cleanup_temp_dir,
     clear_cuda_cache,
     get_logger,
     make_temp_subdir,
@@ -89,7 +88,7 @@ class MaxineVSR:
         device: str = "cuda:0",
     ):
         _require_maxine()
-        self.device = device
+        self.device = config.normalize_device(device)
         self.input_width = int(input_width)
         self.input_height = int(input_height)
         self.output_width = int(output_width)
@@ -340,11 +339,12 @@ def upscale_video_maxine(
     finally:
         if vsr is not None:
             vsr.release()
+        # 只清理本次任务自己的子目录。不要调用 cleanup_temp_dir()：它会清空
+        # 整个 temp/，并发任务（Gradio 队列）之间会互相删掉对方的帧目录。
         if config.KEEP_TEMP_FILES:
             logger.info("保留临时目录用于排查：%s", work_dir)
         else:
             safe_remove(work_dir)
-            cleanup_temp_dir()
 
 
 __all__ = [

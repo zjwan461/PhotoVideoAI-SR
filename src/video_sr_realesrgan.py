@@ -13,7 +13,6 @@ from pathlib import Path
 import config
 from src import ffmpeg_utils, img_sr
 from src.common import (
-    cleanup_temp_dir,
     clear_cuda_cache,
     get_logger,
     make_temp_subdir,
@@ -74,6 +73,10 @@ def upscale_video(
     """
     started = time.time()
     ffmpeg_utils.ensure_ffmpeg()
+
+    # UI 可能直接传下拉标签（"cuda:0 | <名称> (32 GB, sm_89)"），先归一化，
+    # 后续交给引擎与日志的值才一致、才不会被 torch 拒绝。
+    device = config.normalize_device(device)
 
     source = Path(input_path)
     if not source.is_file():
@@ -215,12 +218,14 @@ def upscale_video(
         return target, result_info
 
     finally:
-        # 无论成功失败都清理临时产物（可被 config.KEEP_TEMP_FILES 关闭）
+        # 只清理本次任务自己的子目录（可被 config.KEEP_TEMP_FILES 关闭）。
+        # 这里**不能**调用 cleanup_temp_dir()：它会清空整个 temp/，而
+        # Gradio 队列默认并发 4，两个视频任务同时跑时会互相删掉对方的帧目录。
+        # 全局清理只应发生在启动阶段（见 src.common.cleanup_stale_temp）。
         if config.KEEP_TEMP_FILES:
             logger.info("保留临时目录用于排查：%s", work_dir)
         else:
             safe_remove(work_dir)
-            cleanup_temp_dir()
 
 
 __all__ = ["VideoSRError", "upscale_video", "estimate_required_vram_gb"]

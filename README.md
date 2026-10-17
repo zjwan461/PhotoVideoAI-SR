@@ -1,5 +1,9 @@
 # PhotoVideoAI-SR
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![CUDA](https://img.shields.io/badge/CUDA-NVIDIA-green.svg)](https://developer.nvidia.com/cuda-toolkit)
+
 **本地运行的图片 / 视频 AI 超分工具**：Python + Gradio WebUI，NVIDIA CUDA 推理，
 FFmpeg 负责媒体编解码。老照片修复、低分辨率视频放大、批量处理，全部在你自己的机器上完成，
 不上传任何文件。
@@ -10,6 +14,9 @@ FFmpeg 负责媒体编解码。老照片修复、低分辨率视频放大、批�
 * 协议：MIT
 
 > 本项目仅支持 **NVIDIA CUDA** 推理。代码与文档中不写死任何显卡型号，GPU 信息一律运行时探测。
+
+**仓库地址**：[https://github.com/zjwan461/PhotoVideoAI-SR](https://github.com/zjwan461/PhotoVideoAI-SR)
+· **问题反馈**：[Issues](https://github.com/zjwan461/PhotoVideoAI-SR/issues)
 
 ---
 
@@ -63,6 +70,7 @@ PhotoVideoAI-SR/
 │   ├── ffmpeg_utils.py             # FFmpeg/FFprobe 封装：拆帧、提音频、合成、探测
 │   ├── img_sr.py                   # RealESRGAN 图片超分（含 LoRA 注入接口）
 │   ├── lora_runtime.py             # 卷积 LoRA 注入/加载/保存（手写实现，不依赖 peft）
+│   ├── torchvision_compat.py       # 兼容垫片：修 basicsr 在新版 torchvision 下的导入失败
 │   ├── video_sr_realesrgan.py      # RealESRGAN 逐帧视频推理
 │   ├── video_sr_maxine.py          # Maxine VSR 时序视频推理（可选，自动 disable）
 │   ├── enhance_extras.py           # 附加增强：去噪、轻量去划痕、可插拔上色
@@ -74,7 +82,10 @@ PhotoVideoAI-SR/
 │       └── trainer.py              # 训练循环、AMP、断点续训、后台运行器
 ├── tests/
 │   ├── selftest.py                 # 基础自测（无 GPU 也能跑媒体链路部分）
-│   └── selftest_train.py           # 微调自测（合成数据 + 微型网络，CPU 可跑）
+│   ├── selftest_train.py           # 微调自测（合成数据 + 微型网络，CPU 可跑）
+│   └── selftest_e2e.py             # 端到端真机验收（需 CUDA + 权重；图片/视频/LoRA/微调/UI）
+├── scripts/
+│   └── install.py                  # 一键安装脚本（处理 CUDA torch / basicsr / 镜像）
 ├── temp/                           # 临时帧与音轨（任务结束自动清理）
 ├── output/                         # 推理输出（batch/ 存放批量结果）
 ├── lora_weights/                   # LoRA 权重 *.pth / *.safetensors
@@ -114,7 +125,7 @@ PhotoVideoAI-SR/
 ### 1. 获取代码
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/zjwan461/PhotoVideoAI-SR.git
 cd PhotoVideoAI-SR
 ```
 
@@ -122,32 +133,67 @@ cd PhotoVideoAI-SR
 
 ```bash
 python -m venv .venv
-# Linux / macOS
-source .venv/bin/activate
 # Windows PowerShell
 .venv\Scripts\Activate.ps1
+# Linux / macOS
+source .venv/bin/activate
 ```
 
-### 3. 安装 CUDA 版 PyTorch（关键步骤）
+> **Windows 用户注意**：请使用 [python.org](https://www.python.org/downloads/) 的安装包
+> 或 conda 环境。Microsoft Store 版的 `python.exe` 只是占位程序，装依赖会失败
+> （安装脚本会检测并给出提示）。
 
-请到 [PyTorch 官网](https://pytorch.org/get-started/locally/) 按你的驱动/CUDA 版本选择命令，例如：
+### 3. 安装依赖（推荐：一键脚本）
 
 ```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+python scripts/install.py
 ```
 
-安装后自检：
+脚本按正确顺序处理三个最容易踩的坑，幂等、可重复运行：
+
+1. **PyTorch 必须是 CUDA 版** —— 默认 PyPI 在 Windows 上给的是 CPU 轮子，
+   装完 `torch.cuda.is_available()` 为 `False`，程序会直接拒绝启动；
+2. **basicsr 不能直接装** —— `basicsr==1.4.2` 的元数据声明了 `tb-nightly`，
+   而该包在 PyPI 上已不存在（报 `No matching distribution found for tb-nightly`），
+   必须 `--no-deps` 安装并手动补齐它的运行时依赖；
+3. **basicsr 是源码包** —— pip 的隔离构建环境会改用默认源重新联网装构建依赖，
+   Windows 下常卡在 `Installing build dependencies` 十几分钟，因此用 `--no-build-isolation`。
+
+国内网络加 `--mirror cn`（PyPI 走清华，PyTorch 轮子走 SJTU 镜像，实测快一个数量级以上）：
+
+```bash
+python scripts/install.py --mirror cn
+```
+
+其它参数：
+
+```bash
+python scripts/install.py --skip-torch   # 已装好 CUDA 版 PyTorch
+python scripts/install.py --cpu          # 只装 CPU 版（仅用于看界面，推理会失败）
+python scripts/install.py --dry-run      # 只打印将要执行的命令
+```
+
+### 4. 手动安装（不使用脚本时）
+
+```bash
+# 4.1 先装 CUDA 版 PyTorch（不要用默认源，Windows 上是 CPU 版）
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+# 国内镜像：--index-url https://mirror.sjtu.edu.cn/pytorch-wheels/cu126
+
+# 4.2 核心依赖（本文件可被普通 pip 安装，不含 torch / basicsr / realesrgan）
+pip install -r requirements.txt
+
+# 4.3 超分模型栈 —— 顺序不能换
+pip install addict future lmdb pyyaml requests scikit-image scipy yapf facexlib
+pip install --no-build-isolation --no-deps basicsr==1.4.2
+pip install --no-deps realesrgan==0.3.0
+```
+
+安装后自检（第一条最后一个值必须是 `True`，第二条应为 `True ''`）：
 
 ```bash
 python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
-```
-
-`True` 才说明 CUDA 可用。若为 `False`，请先解决环境问题再继续。
-
-### 4. 安装项目依赖
-
-```bash
-pip install -r requirements.txt
+python -c "import src.img_sr as m; print(m.HAS_REALESRGAN, m.REALESRGAN_IMPORT_ERROR)"
 ```
 
 ### 5. 安装 FFmpeg
@@ -155,12 +201,14 @@ pip install -r requirements.txt
 * Ubuntu / Debian：`sudo apt install ffmpeg`
 * Windows：下载官方构建包，把 `bin` 目录加入 PATH（或设置 `PVSR_FFMPEG`）
 * 验证：`ffmpeg -version` 与 `ffprobe -version` 都能输出
+* 版本：FFmpeg 4.x ~ 9.x 均可。程序会探测版本自动选用 `-vsync 0` 或
+  `-fps_mode passthrough`（`-vsync` 在 FFmpeg 9 已被移除）
 
 ### 6. 安装可选依赖（按需）
 
 ```bash
-pip install gfpgan          # 人脸修复
-pip install safetensors     # 读取 .safetensors 格式的 LoRA
+pip install gfpgan          # 人脸修复（还需把 GFPGANv1.4.pth 放进 model_weights/）
+pip install safetensors     # 读写 .safetensors 格式的 LoRA
 # Maxine VSR：按 NVIDIA 官方文档安装 nvvfx 相关组件
 ```
 
@@ -185,6 +233,17 @@ pip install safetensors     # 读取 .safetensors 格式的 LoRA
 | `RealESRGAN_x4plus_anime_6B.pth` | 动漫插画向 4 倍（更小更快） | https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth |
 | `RealESRGAN_x2plus.pth` | 通用 2 倍 | https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth |
 | `GFPGANv1.4.pth`（可选） | 人脸修复权重 | https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth |
+
+> **国内网络提示**：这些文件托管在 GitHub Releases，直连常只有几十 KB/s
+>（默认模型约 64 MB）。若长时间无进展，可用代理下载后手工放到 `model_weights/`：
+>
+> ```bash
+> curl -L --proxy http://127.0.0.1:1080 -o model_weights/RealESRGAN_x4plus.pth \
+>   https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth
+> ```
+>
+> 下载完成后可用 `python -c "import torch;torch.load('model_weights/RealESRGAN_x4plus.pth',map_location='cpu')"`
+> 自检文件是否完整（损坏会报 zip archive 相关错误）。
 
 想新增自定义模型时，在 `config.MODEL_REGISTRY` 里补一条名称/地址/说明即可，UI 下拉框会自动出现。
 
@@ -418,15 +477,20 @@ print(runner.status(), runner.result)
 
 1. **仅支持 NVIDIA CUDA**：AMD / Apple Silicon / 纯 CPU 不在支持范围内；缺失 CUDA 时程序直接退出并提示。
 2. **Maxine 冒烟依赖官方 SDK**：未安装 `nvvfx` 时该链路不可用（UI 自动隐藏）；不同版本 API 存在差异，
-   程序做了兼容性检查，若你的版本报“会话创建失败”，请附版本信息提 issue。
+   程序做了兼容性检查，若你的版本报“会话创建失败”，请附版本信息到
+   [Issues](https://github.com/zjwan461/PhotoVideoAI-SR/issues) 反馈。
 3. **视频逐帧超分耗时与磁盘占用随帧数线性增长**：长视频建议先用预览模式确认参数。
 4. **音轨处理**：源视频无音轨时输出为无声视频；MKV 下音频直接 `copy`，若源音频编码不被容器支持会失败。
 5. **LoRA 需要与基础模型结构匹配**：`rank` 从权重文件自动推断；匹配度低于 50% 时会拒绝加载并说明原因，
    而不是静默地只生效一部分。
 6. **黑白上色需要自行接入引擎**：本项目不内置彩色化模型权重，装好引擎后用
    `src.enhance_extras.register_colorizer(fn, "引擎名")` 注册，UI 才会出现上色开关。
-7. **临时文件清理**：正常结束会清空 `temp/`；进程被强杀时可能残留，下次启动会自动清理超过 24 小时的内容。
+7. **临时文件清理**：每个视频任务只清理自己在 `temp/` 下的子目录（并发任务互不影响）；
+   进程被强杀时可能残留，下次启动会自动清理超过 24 小时的内容。
 8. **GFPGAN 为人脸专用**：非人脸图片开启该开关基本无变化，且会额外占用显存。
+9. **依赖版本的兼容性由本项目兜底**：torchvision ≥ 0.17 删除 `transforms.functional_tensor`
+   的坑由 `src/torchvision_compat.py` 自动兼容；FFmpeg 9 移除 `-vsync` 的坑由版本探测自动处理。
+   numpy 在 **1.26.4 与 2.4.6** 上均通过完整自测（含真实推理与微调）。
 
 ---
 
@@ -443,9 +507,26 @@ A：关闭其它占显存的程序；把 tile 调小（如 200）；关闭半精
 A：安装 FFmpeg 并确保 `ffmpeg`、`ffprobe` 在 PATH 中，或设置 `PVSR_FFMPEG` / `PVSR_FFPROBE` 指向绝对路径；
 界面的「环境与 LoRA」Tab 可以查看实时状态。
 
-**Q：`basicsr` 安装或导入报错（如 `torchvision.transforms.functional_tensor`）。**
-A：`basicsr 1.4.2` 对较新的 torchvision 有兼容问题，常见做法是安装匹配的 torchvision 版本，
-或在虚拟环境中把该导入改为 `torchvision.transforms.functional`（环境层面的临时修补，不改动本项目代码）。
+**Q：导入 `realesrgan` 报 `No module named 'torchvision.transforms.functional_tensor'`。**
+A：这**不是**没装 basicsr，而是 torchvision ≥ 0.17 删掉了该子模块，而 `basicsr 1.4.2`
+仍在模块顶层导入它（经 `basicsr.data.degradations` 牵连到 `realesrgan`）。
+本项目已内置兼容垫片（`src/torchvision_compat.py`，在导入 basicsr 前自动注册转发模块），
+**无需**再手动改 site-packages 或降级 torchvision。若仍失败，`img_sr` 会给出包含垫片
+安装结果的明确提示。
+
+**Q：`pip install basicsr` 报 `No matching distribution found for tb-nightly`。**
+A：`basicsr 1.4.2` 的元数据声明了 `tb-nightly`，但该包在 PyPI 上已不可用。
+用 `--no-deps` 装 basicsr 并手动补齐依赖即可；命令见 [安装](#安装) 章节，
+或直接运行 `python scripts/install.py`。
+`tb-nightly` 只用于 basicsr 自己的 TensorBoard 日志，本项目不调用。
+
+**Q：安装依赖时 pip 长时间卡在 `Installing build dependencies`。**
+A：那是 basicsr 源码包在**隔离构建环境**里用默认 PyPI 重新联网装构建依赖，国内网络下会很久。
+改用 `pip install --no-build-isolation --no-deps basicsr==1.4.2`（需先装好 setuptools/wheel）。
+
+**Q：拆帧报 `Unrecognized option 'vsync'`。**
+A：FFmpeg 9 已移除 `-vsync`。本项目会按 `ffmpeg -version` 自动改用
+`-fps_mode passthrough`，并在版本探测不准时于运行期自动回退，正常无需干预。
 
 **Q：输出的视频没有声音。**
 A：确认源视频有音轨（视频 Tab 的源信息会显示“音频: 有/无”）；MKV 容器下音频为直接复制，若编码不被支持会失败。
@@ -471,7 +552,7 @@ A：OpenCV 的 `putText` 不支持中文字形，因此预览图标签使用英�
 
 ```bash
 # 语法检查
-python -m compileall app.py config.py src tests
+python -m compileall app.py config.py src tests scripts
 
 # 导入检查（不触发模型加载）
 python -c "import config, src.common, src.ffmpeg_utils, src.img_sr, src.lora_runtime"
@@ -483,6 +564,11 @@ PVSR_SELFTEST_CPU=1 python tests/selftest.py
 
 # 微调模块自测：合成数据 + 微型网络，CPU 即可跑完整训练/验证/续训链路
 python tests/selftest_train.py
+
+# 端到端真机验收：真实权重 + 真实 GPU，覆盖图片 4K / LoRA / 视频 / GPU 微调 / UI 处理器
+python tests/selftest_e2e.py                 # 全部跑（约 20 秒）
+python tests/selftest_e2e.py --skip-train    # 跳过微调，只验推理与界面
+python tests/selftest_e2e.py --keep          # 保留临时产物便于排查
 
 # 环境自检
 python -c "import config; print(config.runtime_summary())"
@@ -496,6 +582,9 @@ python -c "from src.ffmpeg_utils import probe_encoder_support; print(probe_encod
 * 图片：普通照片放大 / 老照片压缩图放大 / 加载自定义 LoRA 对比效果
 * 视频：低分辨率短视频逐帧超分 / Maxine 链路（已装 nvvfx）/ 预览模式 / 音轨保留与播放
 * 边界：显存不足 / 损坏图片或视频 / FFmpeg 未安装 / 无 CUDA 设备
+
+> `tests/selftest_e2e.py` 覆盖了上面「图片 / 视频 / LoRA / 微调」的主干路径，
+> 缺 CUDA 或缺权重时会自动跳过并返回 0，适合在没有显卡的机器上做 CI 冒烟。
 
 ---
 

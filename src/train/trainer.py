@@ -124,6 +124,9 @@ class TrainConfig:
             raise TrainingError("梯度累积步数必须 >= 1。")
         if self.loss not in ("l1", "l1+perceptual"):
             raise TrainingError(f"未知的损失类型：{self.loss}")
+        # device 可能来自 UI 下拉标签（"cuda:0 | <名称> (32 GB, sm_89)"）：
+        # 在这里统一成 torch 可接受的写法，后续 .to(cfg.device) 才不会报错。
+        self.device = config.normalize_device(self.device)
 
     @property
     def run_tag(self) -> str:

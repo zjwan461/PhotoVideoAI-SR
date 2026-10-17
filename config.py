@@ -248,6 +248,42 @@ def gpu_index_from_option(option: str | None) -> int:
     return int(parse_gpu_option(option).split(":", 1)[1])
 
 
+def normalize_device(device: str | None) -> str:
+    """把 UI 下拉标签 / 简写统一成 ``torch.device()`` 能接受的设备字符串。
+
+    项目里 ``device`` 有两种来源：
+
+    * Gradio 下拉框的**显示标签**，形如
+      ``"cuda:0 | NVIDIA GeForce RTX 4080 SUPER (32.0 GB, sm_89)"``；
+    * 代码里的简写，如 ``"cuda:0"``、``"cuda"``、``"cpu"``。
+
+    两者都允许传入，但**交给 torch 之前必须归一化**：把标签原样传下去会得到
+    ``RuntimeError: Invalid device string: 'cuda:0 | ...'``。
+
+    Args:
+        device: 下拉标签、``cuda:N``、``cuda``、``cpu``，或 None/空值。
+
+    Returns:
+        归一化后的设备字符串。``cpu`` 会被保留（供 ``--allow-cpu`` 调试与
+        CPU 自测使用）；空值按 CUDA 可用性自动选择。
+    """
+    if not device:
+        return "cuda:0" if cuda_available() else "cpu"
+    token = str(device).strip().split("|")[0].strip().lower()
+    if token.startswith("cuda"):
+        if ":" not in token:
+            return "cuda:0"
+        _, _, index = token.partition(":")
+        try:
+            int(index)
+        except ValueError:
+            return "cuda:0"
+        return f"cuda:{index}"
+    if token == "cpu":
+        return "cpu"
+    return "cuda:0" if cuda_available() else "cpu"
+
+
 # --------------------------------------------------------------------------- #
 # 外部依赖可用性
 # --------------------------------------------------------------------------- #
@@ -281,13 +317,22 @@ def maxine_available() -> bool:
     return True
 
 
+def gfpgan_weights_path() -> Path:
+    """人脸修复（可选组件）的权重路径。"""
+    return MODEL_DIR / "GFPGANv1.4.pth"
+
+
 def gfpgan_available() -> bool:
-    """检测可选的人脸修复依赖是否可用。"""
+    """检测可选的人脸修复是否**真正可用**：「依赖 + 权重」都要在。
+
+    只装了 ``gfpgan`` 库、但没有 ``GFPGANv1.4.pth`` 时返回 False，
+    这样 UI 会直接隐藏该开关，而不是让人点下去才看到「缺少权重」的报错。
+    """
     try:
         from gfpgan import GFPGANer  # noqa: F401
     except Exception:
         return False
-    return True
+    return gfpgan_weights_path().is_file()
 
 
 def video_model_options() -> list[str]:
@@ -311,5 +356,10 @@ def runtime_summary() -> str:
     else:
         lines.append("CUDA: 未检测到可用设备")
     lines.append(f"Maxine VSR: {'可用' if maxine_available() else '不可用 (已隐藏)'}")
-    lines.append(f"GFPGAN: {'可用' if gfpgan_available() else '不可用 (已隐藏)'}")
+    if gfpgan_available():
+        lines.append("GFPGAN: 可用")
+    elif gfpgan_weights_path().is_file():
+        lines.append("GFPGAN: 不可用 (缺少 gfpgan 依赖，已隐藏)")
+    else:
+        lines.append(f"GFPGAN: 不可用 (缺少权重 {gfpgan_weights_path().name}，已隐藏)")
     return "\n".join(lines)

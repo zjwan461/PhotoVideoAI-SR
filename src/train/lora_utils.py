@@ -104,6 +104,9 @@ def prepare_lora_model(
     if not HAS_TORCH:
         raise LoRAError("LoRA 微调需要安装 PyTorch（CUDA 版）。")
 
+    # UI 传入的可能是下拉标签（"cuda:0 | <名称> (32 GB, sm_89)"），先归一化。
+    device = config.normalize_device(device)
+
     if network_factory is not None:
         network = network_factory(model_name)
         weights: Path | None = None

@@ -70,6 +70,14 @@ if HAS_TORCH:
                 dilation=base_conv.dilation,
                 bias=False,
             )
+            # 跟随基础卷积的 dtype / device。这一步是必须的：
+            # RealESRGANer 在 half=True 时会把整条主干转成 fp16，而 nn.Conv2d
+            # 默认创建 fp32 权重，不统一就会在 forward 时报
+            # 「Input type (HalfTensor) and weight type (FloatTensor) should be the same」。
+            # 先迁移再做初始化，保证 A 的随机初始化与 B 的零初始化都落在目标精度上。
+            reference = base_conv.weight
+            self.lora_A.to(dtype=reference.dtype, device=reference.device)
+            self.lora_B.to(dtype=reference.dtype, device=reference.device)
             self.reset_parameters()
 
         def reset_parameters(self) -> None:
