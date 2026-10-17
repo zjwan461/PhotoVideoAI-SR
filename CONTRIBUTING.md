@@ -83,3 +83,7 @@ python tests/selftest_e2e.py        # 端到端真机验收（需 CUDA + 权重�
   LoRA 与 FP16 主干的 dtype 不一致、UI 设备下拉标签被原样传给 torch
   （`config.normalize_device`）；并把视频任务的临时目录清理改为只清自己的子目录（并发安全）。
   对应验收脚本：`tests/selftest_e2e.py`。
+* P4（调研中）：**模糊老照片「只是变大、没有变清晰」**。已完成问题定量与方案对比，
+  结论是「强模糊下超分退化为平滑 + 纹理合成」，并列出管线侧的放大因素与候选方案（锐化 /
+  复原前置模型 / 扩散式复原）。实施计划与 TODO 见
+  [`docs/TODO-blurry-old-photos.md`](docs/TODO-blurry-old-photos.md)。
