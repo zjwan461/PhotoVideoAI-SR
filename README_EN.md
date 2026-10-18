@@ -59,6 +59,17 @@ upscaling and batch processing all happen on your own machine — no file is eve
 | ⏹ Task cancellation | Image / batch / video tasks can be cancelled at any time, typically stopping within one second and cleaning up temporary files (works during model download too) |
 | 🧹 VRAM management | One click unloads the model and reclaims the CUDA cache, so OOM no longer means restarting the program (refuses while a task is active) |
 
+### Sample output
+
+![Upscaling comparison](docs/images/sr-demo.jpg)
+
+> A 400×267 web photo → **4x upscaling + sharpness 0.35** (1600×1068, about 0.7 s on an RTX 4080 SUPER).
+> The top row compares the full frame; the bottom row is a **1:1 pixel comparison** of the same region
+> (left: the input enlarged with nearest-neighbour, so individual pixels are visible).
+> The fur and wood-grain detail is reconstructed by the model — plausible generation, not recovery of real data.
+>
+> Sample photo: [André Spieker](https://unsplash.com/photos/8wTPqxlnKM4) / Unsplash (Unsplash License).
+
 ---
 
 ## Directory Structure
