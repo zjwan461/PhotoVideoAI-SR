@@ -228,6 +228,22 @@ def _locate(root: Path, filename: str) -> Path:
 # --------------------------------------------------------------------------- #
 # 安装
 # --------------------------------------------------------------------------- #
+def _wait_available(timeout: float = 15.0) -> bool:
+    """等待 ffmpeg / ffprobe 变为可执行。
+
+    Windows 上刚写入的 160 MB 级 exe 常被杀毒软件短暂独占扫描，
+    这几秒内 ``shutil.which`` 会返回 False——那不是安装失败，等一下就正常。
+    （实测：BtbN 的 ffmpeg.exe 刚落地时 which 失败，几秒后恢复正常。）
+    """
+    deadline = time.time() + max(0.0, float(timeout))
+    while True:
+        if config.ffmpeg_available():
+            return True
+        if time.time() >= deadline:
+            return config.ffmpeg_available()
+        time.sleep(0.5)
+
+
 def verify() -> str:
     """执行一次 ``ffmpeg -version`` 自检，返回版本首行。"""
     from src import ffmpeg_utils
@@ -240,9 +256,9 @@ def verify() -> str:
         raise FFmpegInstallError(f"FFmpeg 安装后仍无法执行：{exc}") from exc
     if completed.returncode != 0:
         raise FFmpegInstallError("FFmpeg 安装后无法正常执行（退出码非 0）。")
-    if not config.ffmpeg_available():
+    if not _wait_available():
         raise FFmpegInstallError(
-            "FFmpeg 已下载，但 ffprobe 不可用；请检查 "
+            "FFmpeg 已下载，但 ffprobe 仍不可用；请检查 "
             f"{config.FFMPEG_BUNDLE_DIR} 目录是否完整。"
         )
     lines = (completed.stdout or completed.stderr or "").strip().splitlines()

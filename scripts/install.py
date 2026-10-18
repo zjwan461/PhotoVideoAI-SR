@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -592,6 +593,62 @@ def install_lpips(args: argparse.Namespace) -> bool:
     return True
 
 
+def install_ffmpeg(args: argparse.Namespace) -> bool:
+    """确保 FFmpeg 可用：PATH 里已有就跳过，否则下载到 ``tools/ffmpeg/``。
+
+    复用 ``src.ffmpeg_installer``（与 WebUI 首页那个「一键下载 FFmpeg」是同一套逻辑：
+    多源自动回退、断点续传、低速放弃、解压后自检）。这样「装了依赖但没有 FFmpeg」
+    不再需要用户再点一次按钮。
+    """
+    section("检查 FFmpeg")
+    # 以 `python scripts/install.py` 运行时 sys.path[0] 是 scripts/，把项目根加进来才能 import
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    # 延迟导入：本脚本要在装依赖之前也能跑，而 src.common 只依赖标准库 + config
+    try:
+        import config as project_config
+        from src import ffmpeg_installer
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠️ 无法加载 FFmpeg 安装组件（{exc}），跳过。")
+        return True
+
+    if project_config.ffmpeg_available():
+        where = shutil.which(project_config.FFMPEG_BIN) or project_config.FFMPEG_BIN
+        print(f"  ✅ 已检测到 FFmpeg，跳过（{where}）")
+        return True
+
+    if not ffmpeg_installer.is_supported():
+        print("  ⚠️ 当前平台不支持自动下载，请手动安装后加入 PATH：")
+        for line in ffmpeg_installer.manual_hint().splitlines():
+            print(f"     {line}")
+        return True
+
+    if args.dry_run:
+        for url in ffmpeg_installer.candidate_urls():
+            print(f"  $ （dry-run）下载 {url}")
+        return True
+
+    state = {"pct": -1}
+
+    def report(value: float, message: str) -> None:
+        pct = int(value * 100)
+        if pct != state["pct"]:
+            state["pct"] = pct
+            print(f"\r  {message} … {pct:3d}%", end="", flush=True)
+
+    try:
+        installed = ffmpeg_installer.install(progress=report)
+    except Exception as exc:  # noqa: BLE001 - 网络问题不应让整个安装失败
+        print(f"\n  ⚠️ FFmpeg 未装上：{exc}")
+        print("     图片超分不受影响；需要视频功能时可在 WebUI 首页点「下载 FFmpeg」重试。")
+        return True
+
+    print()
+    print(f"  ✅ 已安装到项目内：{installed}")
+    print(f"     运行时优先使用它（也可用 PVSR_FFMPEG 指定自己的路径）")
+    return True
+
+
 def verify(args: argparse.Namespace) -> bool:
     section("验证安装结果")
     if args.dry_run:
@@ -656,6 +713,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="自定义 PyTorch 轮子索引（默认 cu126）")
     parser.add_argument("--skip-torch", action="store_true",
                         help="跳过 PyTorch 安装（已装好 CUDA 版时使用）")
+    parser.add_argument("--skip-ffmpeg", action="store_true",
+                        help="跳过 FFmpeg 自动下载（已自行安装并加入 PATH 时使用）")
     parser.add_argument("--cpu", action="store_true",
                         help="安装 CPU 版 PyTorch（仅用于界面调试，推理会失败）")
     parser.add_argument("--maxine", action="store_true",
@@ -704,6 +763,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if not install_super_resolution(args):
         return 1
+    if not args.skip_ffmpeg:
+        install_ffmpeg(args)
     if args.maxine:
         if not install_maxine(args):
             return 1

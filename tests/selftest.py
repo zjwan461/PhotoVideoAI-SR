@@ -85,6 +85,43 @@ def test_config_and_common() -> None:
     default_args = installer.parse_args([])
     check("默认不装可选组件",
           not (default_args.maxine or default_args.gfpgan or default_args.restore))
+    check("--skip-ffmpeg 可关闭 FFmpeg 下载", installer.parse_args(["--skip-ffmpeg"]).skip_ffmpeg)
+
+    # 安装脚本里的 FFmpeg 步骤：强制「未安装」时应当给出下载源（不真的下载）
+    import contextlib
+    import io
+
+    buffered = io.StringIO()
+    with contextlib.redirect_stdout(buffered):
+        patched = installer.parse_args(["--dry-run"])
+        original_available = config.ffmpeg_available
+        config.ffmpeg_available = lambda: False
+        try:
+            installer.install_ffmpeg(patched)
+        finally:
+            config.ffmpeg_available = original_available
+    emitted = buffered.getvalue()
+    check("FFmpeg 步骤能给出下载源",
+          "http" in emitted and "dry-run" in emitted,
+          emitted.strip().splitlines()[-1][:80] if emitted.strip() else "无输出")
+
+    # 安装后自检需要容忍「新 exe 被杀毒软件短暂独占」（which 短时间内返回 False）
+    from src import ffmpeg_installer as _fi
+
+    calls = {"n": 0}
+    original_available2 = config.ffmpeg_available
+
+    def flaky() -> bool:
+        calls["n"] += 1
+        return calls["n"] >= 3  # 前两次失败，第三次恢复
+
+    config.ffmpeg_available = flaky
+    try:
+        waited = _fi._wait_available(timeout=5.0)
+    finally:
+        config.ffmpeg_available = original_available2
+    check("自检会等待短暂的占用/扫描延迟", waited and calls["n"] >= 3,
+          f"第 {calls['n']} 次调用时恢复")
 
     # 复原模型自检命令：直接执行安装脚本用的同一份代码，防止导入语句写错
     installed_restore = [k for k in config.RESTORE_MODELS if config.restore_installed(k)]

@@ -189,7 +189,9 @@ python scripts/install.py --mirror cn
 
 ```bash
 python scripts/install.py --skip-torch   # 已装好 CUDA 版 PyTorch
+python scripts/install.py --skip-ffmpeg  # 已自行安装 FFmpeg（否则缺失时会自动下载）
 python scripts/install.py --cpu          # 只装 CPU 版（仅用于看界面，推理会失败）
+python scripts/install.py --all          # 连可选组件一起装（见第 6 步）
 python scripts/install.py --dry-run      # 只打印将要执行的命令
 ```
 
@@ -218,16 +220,22 @@ python -c "import src.img_sr as m; print(m.HAS_REALESRGAN, m.REALESRGAN_IMPORT_E
 
 ### 5. 安装 FFmpeg
 
+**一键安装脚本会自动处理**（`python scripts/install.py`）：
+检测到 PATH 里已有 FFmpeg 就跳过，没有就下载预编译包到项目内 `tools/ffmpeg/`，
+完成后立即生效——不需要管理员权限，也不用改系统 PATH。想自己管理 FFmpeg 时加 `--skip-ffmpeg`。
+
+手动安装：
+
 * Ubuntu / Debian：`sudo apt install ffmpeg`
 * Windows：下载官方构建包，把 `bin` 目录加入 PATH（或设置 `PVSR_FFMPEG`）
 * 验证：`ffmpeg -version` 与 `ffprobe -version` 都能输出
 * 版本：FFmpeg 4.x ~ 9.x 均可。程序会探测版本自动选用 `-vsync 0` 或
   `-fps_mode passthrough`（`-vsync` 在 FFmpeg 9 已被移除）
 
-> **不想手动装？** 启动 WebUI 后进入「🩺 环境与 LoRA」Tab，点 **⬇️ 下载 FFmpeg**：
-> 程序会自动下载预编译包到项目内 `tools/ffmpeg/`（Windows 约 190 MB，解压后约 340 MB；
-> Linux 约 40 MB），完成后立即生效——**不需要管理员权限，也不用改系统 PATH**，
-> 连程序都不用重启。下载源按顺序自动回退，连续 20 秒低于 64 KB/s 会切换到下一个源；
+> **已经装好了但想补装？** 启动 WebUI 后进入「🩺 环境与 LoRA」Tab，点 **⬇️ 下载 FFmpeg**：
+> 程序自动下载预编译包到项目内 `tools/ffmpeg/`（Windows 约 190 MB，解压后约 340 MB；
+> Linux 约 40 MB），完成后立即生效，连程序都不用重启。
+> 下载源按顺序自动回退，连续 20 秒低于 64 KB/s 会切换到下一个源；
 > 内网环境可用 `PVSR_FFMPEG_URL` 指定镜像地址。
 
 ### 6. 安装可选依赖（按需）
@@ -664,9 +672,12 @@ A：先跑 `python -c "import torch; print(torch.cuda.is_available())"`。为 `F
 A：关闭其它占显存的程序；把 tile 调小（如 200）；关闭半精度或降低输出分辨率；视频任务先开预览模式。
 
 **Q：提示找不到 FFmpeg。**
-A：最省事的做法是启动 WebUI，在「🩺 环境与 LoRA」Tab 点 **⬇️ 下载 FFmpeg**，
-程序会自动装到项目内 `tools/ffmpeg/` 并立即生效（无需管理员权限、不用改 PATH）。
-也可以自己安装 FFmpeg 并确保 `ffmpeg`、`ffprobe` 在 PATH 中，
+A：两个办法——
+
+* 重新跑一次 `python scripts/install.py`：它检测到 FFmpeg 缺失会自动下载到项目内 `tools/ffmpeg/`；
+* 或者启动 WebUI，在「🩺 环境与 LoRA」Tab 点 **⬇️ 下载 FFmpeg**（同一个下载器，跑着的程序不用重启）。
+
+两者都无需管理员权限、不用改 PATH。也可以自己安装 FFmpeg 并确保 `ffmpeg`、`ffprobe` 在 PATH 中，
 或设置 `PVSR_FFMPEG` / `PVSR_FFPROBE` 指向绝对路径。
 优先级：环境变量 > 项目内自带 > PATH；删掉 `tools/ffmpeg/` 即可退回使用系统自带版本。
 

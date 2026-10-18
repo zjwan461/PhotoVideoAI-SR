@@ -190,7 +190,9 @@ Other options:
 
 ```bash
 python scripts/install.py --skip-torch   # CUDA PyTorch is already installed
+python scripts/install.py --skip-ffmpeg  # FFmpeg is managed by you (otherwise it is downloaded when missing)
 python scripts/install.py --cpu          # install the CPU build only (UI only, inference will fail)
+python scripts/install.py --all          # also install the optional components (see step 6)
 python scripts/install.py --dry-run      # only print the commands that would be executed
 ```
 
@@ -219,16 +221,22 @@ python -c "import src.img_sr as m; print(m.HAS_REALESRGAN, m.REALESRGAN_IMPORT_E
 
 ### 5. Install FFmpeg
 
+**The one-click installer handles it** (`python scripts/install.py`): if FFmpeg is already on PATH it is skipped,
+otherwise a prebuilt package is downloaded into the project's `tools/ffmpeg/` and takes effect immediately —
+no administrator rights and no PATH changes. Pass `--skip-ffmpeg` if you prefer to manage FFmpeg yourself.
+
+Manual installation:
+
 * Ubuntu / Debian: `sudo apt install ffmpeg`
 * Windows: download an official build and add the `bin` directory to PATH (or set `PVSR_FFMPEG`)
 * Verify: both `ffmpeg -version` and `ffprobe -version` produce output
 * Version: FFmpeg 4.x ~ 9.x all work. The program probes the version and automatically picks either `-vsync 0` or
   `-fps_mode passthrough` (`-vsync` was removed in FFmpeg 9)
 
-> **Do not want to install it by hand?** Start the WebUI, open the 「🩺 环境与 LoRA (Environment & LoRA)」 Tab
+> **Already set up but want the bundled one?** Start the WebUI, open the 「🩺 环境与 LoRA (Environment & LoRA)」 Tab
 > and click **⬇️ 下载 FFmpeg (Download FFmpeg)**. The program downloads a prebuilt package into the project's
 > `tools/ffmpeg/` (about 190 MB on Windows, roughly 340 MB once extracted; about 40 MB on Linux) and takes
-> effect immediately — **no administrator rights, no changes to the system PATH, and no restart**.
+> effect immediately, without restarting.
 > Download sources are tried in order, and if throughput stays below 64 KB/s for 20 seconds it switches
 > to the next source. On restricted networks, point `PVSR_FFMPEG_URL` at a mirror.
 
@@ -676,9 +684,14 @@ or the driver is older than that PyTorch requires. Reinstall the CUDA build of P
 A: Close other VRAM-hungry programs; lower the tile size (e.g. 200); turn off half precision or lower the output resolution; for video tasks start with preview mode.
 
 **Q: It says FFmpeg cannot be found.**
-A: The easiest fix: start the WebUI, open the 「🩺 环境与 LoRA (Environment & LoRA)」 Tab and click
-**⬇️ 下载 FFmpeg (Download FFmpeg)**. The program installs it into the project's `tools/ffmpeg/` and
-takes effect immediately (no administrator rights, no PATH changes).
+A: Two options:
+
+* Re-run `python scripts/install.py` — when FFmpeg is missing it downloads a prebuilt package into the
+  project's `tools/ffmpeg/`;
+* Or start the WebUI, open the 「🩺 环境与 LoRA (Environment & LoRA)」 Tab and click
+  **⬇️ 下载 FFmpeg (Download FFmpeg)** (same downloader; a running program needs no restart).
+
+Neither needs administrator rights or PATH changes.
 You can also install FFmpeg yourself and make sure `ffmpeg` and `ffprobe` are on PATH, or set
 `PVSR_FFMPEG` / `PVSR_FFPROBE` to absolute paths.
 Priority: environment variables > bundled copy > PATH; delete `tools/ffmpeg/` to fall back to the system build.
