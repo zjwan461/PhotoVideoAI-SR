@@ -58,6 +58,18 @@ def test_config_and_common() -> None:
     check("越权 LoRA 路径被拒绝", resolve_lora_path("/etc/passwd") is None)
     check("扫描 LoRA 目录不报错", isinstance(scan_lora_weights(), list))
 
+    # 显存估算：旧实现是常量（1080×1920 与 640×360 都给 5.7 GB），实测差 3 倍
+    from src import img_sr as _img_sr
+
+    small = _img_sr.estimate_required_vram_gb(640, 360)
+    large = _img_sr.estimate_required_vram_gb(1080, 1920)
+    check("显存估算随输入尺寸变化", large >= small * 2.5, f"{small} GB -> {large} GB")
+    tiled = _img_sr.estimate_required_vram_gb(1080, 1920, tile=400)
+    check("分块后估算显著下降", tiled < large / 3, f"分块 {tiled} GB vs 不分块 {large} GB")
+    check("低显存时自动分块被计入",
+          _img_sr.estimate_required_vram_gb(1080, 1920, free_vram_gb=8.0) < large / 3,
+          "空闲 8 GB 应推算为分块")
+
     # 安装脚本的参数解析（--all 应等价于三个可选组件全开）
     import importlib.util
 

@@ -151,6 +151,9 @@ def info_panel_html(info: dict) -> str:
     free_vram = info.get("free_vram_gb")
     if free_vram is not None:
         rows.append(("任务后空闲显存", f"{free_vram} GB"))
+    peak_vram = info.get("peak_vram_gb")
+    if peak_vram is not None:
+        rows.append(("显存峰值", f"{peak_vram} GB（实测）"))
     pipeline = info.get("pipeline")
     if pipeline:
         rows.append(
@@ -402,7 +405,13 @@ def handle_image(
 
     target_long_edge = img_sr.resolve_target_long_edge(preset_name)
     ok, message = check_vram_for_task(
-        img_sr.estimate_required_vram_gb(target_long_edge, outscale), device, "图片超分"
+        img_sr.estimate_required_vram_gb(
+            image.shape[1], image.shape[0],
+            outscale=float(outscale),
+            tile=int(tile_size or 0),
+            half=bool(half_precision),
+        ),
+        device, "图片超分",
     )
     if not ok:
         logger.warning(message)
@@ -612,8 +621,20 @@ def handle_video(
     crf_value = int(crf) if quality_mode == "恒定质量" and crf else None
 
     if not use_maxine:
+        # 按源视频的**帧尺寸**估算（与图片同理，显存只跟输入像素有关）
+        frame_w = frame_h = 0
+        try:
+            media = ffmpeg_utils.get_video_info(video_path)
+            frame_w, frame_h = int(media.get("width") or 0), int(media.get("height") or 0)
+        except Exception:  # noqa: BLE001 - 读不到就按未知处理
+            pass
         ok, message = check_vram_for_task(
-            rr_mod.estimate_required_vram_gb(img_sr.resolve_target_long_edge(preset_name), outscale),
+            rr_mod.estimate_required_vram_gb(
+                frame_w, frame_h,
+                outscale=float(outscale),
+                tile=int(tile_size or 0),
+                half=bool(half_precision),
+            ),
             device,
             "视频逐帧超分",
         )
@@ -677,11 +698,11 @@ def preview_video_info(video_path):
 
 
 @safe_handler("读取图片信息")
-def preview_image_info(image, preset_name, outscale):
+def preview_image_info(image, preset_name, outscale, tile_size=0, half_precision=True, device_name=None):
     """上传图片后立即展示源图信息与预计输出（与视频 Tab 的源信息对应）。
 
-    除了尺寸/通道这类静态信息，还会按当前「输出分辨率预设」和「超分倍率」
-    预测最终像素尺寸与所需显存——这三个控件任一变化都会刷新。
+    除了尺寸/通道这类静态信息，还会按当前「输出分辨率预设」「超分倍率」「分块」
+    「半精度」预测最终像素尺寸与所需显存——这些控件任一变化都会刷新。
     """
     if image is None or getattr(image, "size", 0) == 0:
         return "_上传图片后显示图片信息_"
@@ -704,7 +725,14 @@ def preview_image_info(image, preset_name, outscale):
         out_w, out_h = img_sr.plan_output_size(
             width, height, outscale=float(outscale or 4.0), target_long_edge=target
         )
-        vram = img_sr.estimate_required_vram_gb(target, float(outscale or 4.0))
+        tile = int(tile_size or 0)
+        vram = img_sr.estimate_required_vram_gb(
+            width, height,
+            outscale=float(outscale or 4.0),
+            tile=tile,
+            half=bool(half_precision),
+            free_vram_gb=get_free_vram_gb(config.gpu_index_from_option(device_name)),
+        )
         factor = out_w / float(width) if width else 0.0
 
         parts = [
@@ -715,7 +743,16 @@ def preview_image_info(image, preset_name, outscale):
         ]
         if target:
             parts.append(f"预设长边 {target}")
-        parts.append(f"预计显存 ≈ {vram:g} GB")
+        effective_tile = tile or img_sr.auto_tile_for(
+            get_free_vram_gb(config.gpu_index_from_option(device_name))
+        )
+        if effective_tile:
+            suffix = "自动" if not tile else ""
+            parts.append(f"预计显存 ≈ {vram:g} GB（分块 {effective_tile}{suffix}）")
+        else:
+            parts.append(f"预计显存 ≈ {vram:g} GB（不分块）")
+        if not half_precision:
+            parts.append("FP32 显存翻倍")
         if channels == 4:
             parts.append("⚠️ 透明通道会一并放大")
         return "**源图信息：** " + " · ".join(parts)
@@ -1109,10 +1146,10 @@ def build_interface() -> gr.Blocks:
                     outputs=[image_out, image_info, compare_out],
                 )
                 # 源图信息：上传后立即显示，预设/倍率变化时同步刷新
-                for trigger in (image_in, preset_dd, outscale_sl):
+                for trigger in (image_in, preset_dd, outscale_sl, tile_sl, half_cb, device_dd):
                     trigger.change(
                         preview_image_info,
-                        inputs=[image_in, preset_dd, outscale_sl],
+                        inputs=[image_in, preset_dd, outscale_sl, tile_sl, half_cb, device_dd],
                         outputs=[image_source_info],
                     )
                 retro_cb.change(

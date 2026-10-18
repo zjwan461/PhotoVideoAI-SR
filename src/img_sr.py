@@ -399,18 +399,27 @@ def resolve_target_long_edge(preset_name: str | None) -> int:
     return max(width, height)
 
 
+#: 自动分块阈值：(空闲显存上限 GiB, 分块边长)。与加载时实际采用的策略一致。
+_AUTO_TILE_TABLE: tuple[tuple[float, int], ...] = ((4.0, 200), (6.0, 300), (10.0, 400))
+
+
+def auto_tile_for(free_vram_gb: float | None) -> int:
+    """按空闲显存给出自动分块边长（0 表示不分块）。
+
+    单独抽出来，是为了让「显存估算」和「实际加载」用同一份策略——
+    否则界面上预计的和真正跑的会不一致。
+    """
+    if free_vram_gb is None:
+        return 0
+    for threshold, tile in _AUTO_TILE_TABLE:
+        if free_vram_gb < threshold:
+            return tile
+    return 0
+
+
 def _auto_tile(device_index: int) -> int:
     """根据空闲显存自动选择分块大小（0 表示不分块）。"""
-    free_gb = get_free_vram_gb(device_index)
-    if free_gb is None:
-        return 0
-    if free_gb < 4:
-        return 200
-    if free_gb < 6:
-        return 300
-    if free_gb < 10:
-        return 400
-    return 0
+    return auto_tile_for(get_free_vram_gb(device_index))
 
 
 # --------------------------------------------------------------------------- #
@@ -822,14 +831,71 @@ def plan_output_size(
     return _target_size(width, height, outscale=outscale, target_long_edge=target_long_edge)
 
 
-def estimate_required_vram_gb(target_long_edge: int = 0, outscale: float = 4.0) -> float:
-    """粗略估算图片超分所需显存（GiB）。"""
-    base = 2.5 + 0.8 * max(1.0, float(outscale))
-    if target_long_edge >= 3840:
-        base += 3.0
-    elif target_long_edge >= 2560:
-        base += 1.5
-    return round(base, 1)
+#: 显存估算系数：实测校准（RTX 4080 SUPER / fp16 / 4× 推断）
+#: 结论：显存几乎只与**输入像素数**成正比——网络内部固定按 4 倍放大，
+#: ``outscale`` 只影响最后把结果缩放到目标尺寸，几乎不改变显存占用。
+_VRAM_BASE_GB = 0.6        # 权重 + CUDA 上下文
+_VRAM_GB_PER_INPUT_MP = 8.0  # 每百万**输入**像素的激活占用（fp16）
+
+
+def estimate_required_vram_gb(
+    width: int = 0,
+    height: int = 0,
+    *,
+    outscale: float = 4.0,
+    tile: int = 0,
+    half: bool = True,
+    free_vram_gb: float | None = None,
+) -> float:
+    """估算图片超分所需显存（GiB）。
+
+    实测（RTX 4080 SUPER，fp16，4×）：
+
+    | 输入 | 实际分块 | 峰值（alloc / reserved） |
+    | --- | --- | --- |
+    | 640×360 | 不分块 | 1.9 / 2.6 GB |
+    | 1280×720 | 不分块 | 7.6 / 10.1 GB |
+    | 1080×1920 | 不分块 | 17.1 / 22.6 GB |
+    | 1080×1920 | 400 | 1.7 / 3.8 GB |
+    | 2560×1440 | 400 | 1.9 / 3.9 GB |
+
+    两个关键事实：
+
+    1. 显存几乎只与**输入像素数**成正比——网络内部固定按 4 倍放大，
+       ``outscale`` 只影响最后把结果缩放到目标尺寸；
+    2. 一旦分块，峰值与整图大小基本无关（实测 1.7~1.9 GB 封顶）。
+
+    旧实现按「长边 + 倍率」拟合成常量（1080×1920 与 640×360 都给 5.7 GB），
+    与实测差 3 倍，已改为按输入像素计算。
+
+    Args:
+        width, height: 输入图尺寸。传 0 表示未知，按 1 MP 估计。
+        outscale: 输出倍率，只用于输出缓冲项。
+        tile: 分块边长；0 表示「自动」——此时会按 ``free_vram_gb`` 复现真实策略。
+        half: 是否 FP16；关闭后激活占用翻倍。
+        free_vram_gb: 当前空闲显存，用于推演自动分块；None 表示按不分块估算（上限）。
+
+    Returns:
+        估算值（GiB，保留一位小数）。
+    """
+    if width <= 0 or height <= 0:
+        work_mp = 1.0
+        effective_tile = 0
+    else:
+        effective_tile = int(tile) if tile and tile > 0 else auto_tile_for(free_vram_gb)
+        if effective_tile:
+            # 分块：激活只与块尺寸有关（重叠区按 1.15 倍计），与整图大小无关
+            work_mp = (min(width, effective_tile) * min(height, effective_tile)) / 1e6 * 1.15
+        else:
+            work_mp = width * height / 1e6
+
+    per_mp = _VRAM_GB_PER_INPUT_MP * (1.0 if half else 2.0)
+    out_mp = work_mp * max(1.0, float(outscale)) ** 2
+    total = _VRAM_BASE_GB + per_mp * work_mp + 0.05 * out_mp
+    # 不分块时实测在 2 MP 以上趋于平台（~17 GB），按此设上限，避免给出夸张数字
+    if not effective_tile:
+        total = min(total, 18.0)
+    return round(total, 1)
 
 
 def upscale_image(
@@ -913,6 +979,12 @@ def upscale_image(
 
     if progress:
         progress(0.15, "超分推理中…")
+    peak_gb = None
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+    except Exception:  # noqa: BLE001 - 只是统计，失败不影响任务
+        pass
     result = engine.upscale(
         image_rgb,
         outscale=outscale,
@@ -922,6 +994,11 @@ def upscale_image(
         should_cancel=should_cancel,
         sharpen=sharpen,
     )
+    try:
+        if torch.cuda.is_available():
+            peak_gb = torch.cuda.max_memory_allocated() / 2**30
+    except Exception:  # noqa: BLE001
+        peak_gb = None
     if progress:
         progress(1.0, "完成")
 
@@ -934,6 +1011,7 @@ def upscale_image(
         "lora": Path(engine.lora_name).name if engine.lora_name else "不使用 LoRA",
         "device": device,
         "free_vram_gb": get_free_vram_gb(config.gpu_index_from_option(device)),
+        "peak_vram_gb": round(peak_gb, 1) if peak_gb is not None else None,
         "sharpen": round(float(sharpen or 0.0), 2),
         "restore": restore_key or "",
         "face_restore": (

@@ -28,9 +28,18 @@ class VideoSRError(RuntimeError):
     """视频超分过程中的可读错误。"""
 
 
-def estimate_required_vram_gb(target_long_edge: int = 0, outscale: float = 4.0) -> float:
-    """逐帧视频超分的显存估算（与单图一致，逐帧不会叠加占用）。"""
-    return img_sr.estimate_required_vram_gb(target_long_edge, outscale)
+def estimate_required_vram_gb(
+    width: int = 0,
+    height: int = 0,
+    *,
+    outscale: float = 4.0,
+    tile: int = 0,
+    half: bool = True,
+) -> float:
+    """逐帧视频超分的显存估算（与单图一致——逐帧处理不会叠加占用）。"""
+    return img_sr.estimate_required_vram_gb(
+        width, height, outscale=outscale, tile=tile, half=half
+    )
 
 
 def _emit(progress: Callable[[float, str], None] | None, value: float, message: str) -> None:

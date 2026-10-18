@@ -341,8 +341,10 @@ python app.py --allow-cpu                    # start the UI even without CUDA (d
 
 1. Upload an image (alpha channel supported). A **source-info line** appears right below the preview: dimensions,
    orientation and aspect ratio, colour mode (transparency is flagged), megapixels, plus the **predicted output
-   size and VRAM** for the current preset / factor — it refreshes whenever you change 「输出分辨率预设」 or
-   「超分倍率」 (mirroring the 「源视频信息」 line on the video Tab).
+   size and VRAM** for the current preset / factor — it refreshes whenever you change 「输出分辨率预设」,
+   「超分倍率」, 「分块大小」, 「半精度推理」 or the CUDA device (mirroring the 「源视频信息」 line on the video Tab).
+   The VRAM estimate is derived from the **input pixel count** and accounts for the automatic tiling policy;
+   after the run the info panel also reports the **measured peak** for comparison.
 2. Choose the 「输出分辨率预设 (Output resolution preset)」: pick 「原始比例 (Original ratio)」 for extreme upscaling, or 1080p / 2K / 4K etc. for a fixed long edge.
 3. To use a custom style, choose a file from `lora_weights/` in 「LoRA 权重 (LoRA weights)」; if you do not need one, keep 「不使用 LoRA (No LoRA)」.
 4. Click **开始超分 (Start Upscaling)**: the result and task info (elapsed time, input/output resolution, model, device, VRAM, and the sharpness strength used) appear on the right.
