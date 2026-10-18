@@ -225,6 +225,10 @@ python -c "import src.img_sr as m; print(m.HAS_REALESRGAN, m.REALESRGAN_IMPORT_E
 otherwise a prebuilt package is downloaded into the project's `tools/ffmpeg/` and takes effect immediately —
 no administrator rights and no PATH changes. Pass `--skip-ffmpeg` if you prefer to manage FFmpeg yourself.
 
+> **Linux note**: the script prefers a build **with NVENC** (BtbN). Static builds such as johnvansickle's do not
+> list `h264_nvenc` in `ffmpeg -encoders`, so video compositing falls back to software encoding (CPU pegged, GPU idle).
+> The installer now reports the NVENC status; to switch builds, delete `tools/ffmpeg/` and re-run the script.
+
 Manual installation:
 
 * Ubuntu / Debian: `sudo apt install ffmpeg`

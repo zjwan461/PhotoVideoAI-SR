@@ -611,6 +611,28 @@ def install_lpips(args: argparse.Namespace) -> bool:
     return True
 
 
+def _report_nvenc() -> None:
+    """打印当前 FFmpeg 的硬件编码支持；缺失时给出可操作的建议。
+
+    Linux 上 johnvansickle 的静态构建**不含** NVENC，用它合成视频只能软件编码
+    （CPU 吃满、GPU 空转），而界面上只会有一条 WARNING——所以安装脚本这里主动说清楚。
+    """
+    try:
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from src import ffmpeg_utils
+
+        ok = ffmpeg_utils.has_nvenc("h264_nvenc")
+    except Exception:  # noqa: BLE001 - 只是信息展示
+        return
+    if ok:
+        print("     硬件编码：h264_nvenc 可用")
+        return
+    print("     ⚠️ 这个 FFmpeg 构建不含 NVENC，视频合成会回退软件编码（libx264）。")
+    print("        想要硬件编码：删除 tools/ffmpeg 后重跑本脚本（会下载带 NVENC 的构建），")
+    print("        或用 PVSR_FFMPEG 指向一个带 nvenc 的 ffmpeg。")
+
+
 def install_ffmpeg(args: argparse.Namespace) -> bool:
     """确保 FFmpeg 可用：PATH 里已有就跳过，否则下载到 ``tools/ffmpeg/``。
 
@@ -633,6 +655,7 @@ def install_ffmpeg(args: argparse.Namespace) -> bool:
     if project_config.ffmpeg_available():
         where = shutil.which(project_config.FFMPEG_BIN) or project_config.FFMPEG_BIN
         print(f"  ✅ 已检测到 FFmpeg，跳过（{where}）")
+        _report_nvenc()
         return True
 
     if not ffmpeg_installer.is_supported():
@@ -664,6 +687,7 @@ def install_ffmpeg(args: argparse.Namespace) -> bool:
     print()
     print(f"  ✅ 已安装到项目内：{installed}")
     print(f"     运行时优先使用它（也可用 PVSR_FFMPEG 指定自己的路径）")
+    _report_nvenc()
     return True
 
 

@@ -87,6 +87,17 @@ def test_config_and_common() -> None:
           not (default_args.maxine or default_args.gfpgan or default_args.restore))
     check("--skip-ffmpeg 可关闭 FFmpeg 下载", installer.parse_args(["--skip-ffmpeg"]).skip_ffmpeg)
 
+    # Linux 必须优先下 BtbN 构建：johnvansickle 的静态版不含 NVENC（实测字节检索确认）
+    from src import ffmpeg_installer as _finst
+
+    amd = _finst._LINUX_AMD64_URLS
+    check("Linux 首选带 NVENC 的构建（BtbN）",
+          len(amd) >= 2 and all("BtbN" in u for u in amd[:2]) and "johnvansickle" in amd[-1],
+          f"{len(amd)} 个源，首个={amd[0].rsplit('/', 1)[-1]}")
+    check("Linux arm64 同样优先 BtbN",
+          "BtbN" in _finst._LINUX_ARM64_URLS[0],
+          _finst._LINUX_ARM64_URLS[0].rsplit('/', 1)[-1])
+
     # Maxine 的「已安装」判断必须校验 API，不能只看 import（残留空目录会误判）
     maxine_cmd = installer.maxine_check_command()
     check("Maxine 判断要求 VideoSuperRes 存在",

@@ -53,11 +53,22 @@ _WINDOWS_URLS: tuple[str, ...] = (
     "ffmpeg-master-latest-win64-gpl.zip",
     "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
 )
-#: Linux：johnvansickle 的静态构建，单文件无依赖
+#: Linux：优先 BtbN 的构建（**带 NVENC / NVDEC**），johnvansickle 静态版只作兜底。
+#: 实测（对二进制做字节检索）：BtbN 的 gpl 构建含 ``h264_nvenc`` / ``hevc_nvenc``；
+#: johnvansickle 的静态构建**不含**，用它合成视频只能软件编码（CPU 吃满、GPU 空转）。
+#: 因此把它从「首选」降级为「最后兜底」。
 _LINUX_AMD64_URLS: tuple[str, ...] = (
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+    "ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz",
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+    "ffmpeg-master-latest-linux64-gpl.tar.xz",
     "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
 )
 _LINUX_ARM64_URLS: tuple[str, ...] = (
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+    "ffmpeg-n9.0-latest-linuxarm64-gpl-9.0.tar.xz",
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+    "ffmpeg-master-latest-linuxarm64-gpl.tar.xz",
     "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz",
 )
 

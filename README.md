@@ -224,6 +224,10 @@ python -c "import src.img_sr as m; print(m.HAS_REALESRGAN, m.REALESRGAN_IMPORT_E
 检测到 PATH 里已有 FFmpeg 就跳过，没有就下载预编译包到项目内 `tools/ffmpeg/`，
 完成后立即生效——不需要管理员权限，也不用改系统 PATH。想自己管理 FFmpeg 时加 `--skip-ffmpeg`。
 
+> **Linux 用户注意**：脚本会优先下载**带 NVENC** 的构建（BtbN）。若用的是 johnvansickle
+> 那类静态构建，`ffmpeg -encoders` 里没有 `h264_nvenc`，视频合成就只能软件编码（CPU 吃满、GPU 空转）。
+> 安装脚本现在会主动报告 NVENC 状态；要换构建就删掉 `tools/ffmpeg/` 再重跑一次脚本。
+
 手动安装：
 
 * Ubuntu / Debian：`sudo apt install ffmpeg`
