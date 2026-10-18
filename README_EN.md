@@ -46,13 +46,13 @@ upscaling and batch processing all happen on your own machine — no file is eve
 
 | Category | Capability |
 | --- | --- |
-| 📷 Photo upscaling | Single-image upscaling; the result is automatically Lanczos-resized to 720p / 1080p / 2K / 4K / 8K or kept at the original ratio; PNG / JPG output |
+| 📷 Photo upscaling | Single-image upscaling; the result is automatically resized to 720p / 1080p / 2K / 4K / 8K or kept at the original ratio (**exactly one resample**, area-average when shrinking); **sharpness enhancement (CAS)**; **1:1 pixel comparison**; PNG / JPG output |
 | 📁 Batch processing | Upload several images at once, or point at a folder on the server; results all go to `output/batch/` with a success/failure summary |
 | 🎬 Video upscaling | RealESRGAN per-frame pipeline; **streaming pipeline** (decode → infer → encode, no intermediate frames on disk); audio track extracted and muxed back; MP4 / MKV output; output frame rate can be overridden |
 | ⚡ Preview mode | Render only the first N frames (30 by default) to preview the effect, so you need not wait for the whole video |
 | 🧩 LoRA loading | Pick weights from `lora_weights/` in the dropdown, injected into the convolution layers, switch or unload at any time; nothing selected means the pure native base model |
 | 🧪 LoRA fine-tuning | A separate 「模型微调 (Model Fine-tuning)」 Tab: automatic degradation to generate LR, trains LoRA parameters only, validation preview images + PSNR during training, resume from checkpoint, LoRA-only export |
-| 🧹 Extra enhancements | Old photos can optionally get denoising / light descratching (classic algorithms, no extra weights); face restoration (GFPGAN) and B&W colorization are pluggable optional components |
+| 🧹 Extra enhancements | Old-photo **pre-restoration (SwinIR JPEG-artifact removal / denoise)**, denoise / light descratch (classic algorithms, no extra weights), **sharpness enhancement (CAS)**; one-tick 「老照片模式 (Old-photo mode)」; face restoration (GFPGAN) and B&W colorization are pluggable optional components |
 | 🖥️ Hardware encoding | Composited video prefers `h264_nvenc`, falling back to `libx264` when unavailable |
 | 🩺 Status panel | Shows the runtime environment summary, encoder availability, optional component status and the LoRA list |
 | 🛡️ Robustness | VRAM pre-check with friendly hints, missing-FFmpeg hints, per-frame failure fallback, automatic temp-file cleanup, read-only input files |
@@ -77,7 +77,8 @@ PhotoVideoAI-SR/
 │   ├── torchvision_compat.py       # Compatibility shim: fixes basicsr import failure on newer torchvision
 │   ├── video_sr_realesrgan.py      # RealESRGAN per-frame video inference
 │   ├── video_sr_maxine.py          # Maxine VSR temporal video inference (optional, auto-disabled)
-│   ├── enhance_extras.py           # Extra enhancements: denoising, light descratching, pluggable colorization
+│   ├── enhance_extras.py           # Extra enhancements: denoising, light descratching, sharpening, pluggable colorization
+│   ├── restore.py                  # Optional pre-restoration (SwinIR, same-size) for old photos
 │   └── train/                      # [Optional advanced module] LoRA fine-tuning, standalone directory
 │       ├── lora_network.py         # Hand-written LoRA conv layers / train LoRA only / weight merging
 │       ├── lora_utils.py           # Injection, LoRA-only export, load/unload at inference time
@@ -94,6 +95,7 @@ PhotoVideoAI-SR/
 ├── output/                         # Inference output (batch/ holds batch results)
 ├── lora_weights/                   # LoRA weights *.pth / *.safetensors
 ├── model_weights/                  # Base model weights, e.g. RealESRGAN_x4plus.pth
+│   └── restore/                    # Pre-restoration models (scripts/install.py --restore)
 ├── gfpgan/weights/                 # GFPGAN face detection/parsing models (fetched by the installer)
 ├── tools/                          # Tools downloaded at runtime (FFmpeg from the UI button)
 └── logs/                           # Runtime logs (one timestamped file per launch)
@@ -225,8 +227,9 @@ python -c "import src.img_sr as m; print(m.HAS_REALESRGAN, m.REALESRGAN_IMPORT_E
 
 ```bash
 python scripts/install.py --gfpgan     # GFPGAN face restore: library + 3 model files (~534 MB total)
+python scripts/install.py --restore    # Old-photo pre-restoration: SwinIR JPEG-artifact removal (color/B&W) + denoise (~313 MB)
 python scripts/install.py --maxine     # Maxine VSR temporal upscaling: nvidia-vfx wheel (~400 MB)
-python scripts/install.py --gfpgan --maxine   # both
+python scripts/install.py --all        # everything above + lpips (~1.2 GB in one command)
 ```
 
 `--gfpgan` fetches **three** model files (all of them are required):
@@ -325,16 +328,59 @@ python app.py --allow-cpu                    # start the UI even without CUDA (d
 
 ### 📷 Photo Upscaling
 
-1. Upload an image (alpha channel supported).
+1. Upload an image (alpha channel supported). A **source-info line** appears right below the preview: dimensions,
+   orientation and aspect ratio, colour mode (transparency is flagged), megapixels, plus the **predicted output
+   size and VRAM** for the current preset / factor — it refreshes whenever you change 「输出分辨率预设」 or
+   「超分倍率」 (mirroring the 「源视频信息」 line on the video Tab).
 2. Choose the 「输出分辨率预设 (Output resolution preset)」: pick 「原始比例 (Original ratio)」 for extreme upscaling, or 1080p / 2K / 4K etc. for a fixed long edge.
 3. To use a custom style, choose a file from `lora_weights/` in 「LoRA 权重 (LoRA weights)」; if you do not need one, keep 「不使用 LoRA (No LoRA)」.
-4. Click **开始超分 (Start Upscaling)**: the result and task info (elapsed time, input/output resolution, model, device, VRAM) appear on the right.
-5. The result is also saved to `output/`.
+4. Click **开始超分 (Start Upscaling)**: the result and task info (elapsed time, input/output resolution, model, device, VRAM, and the sharpness strength used) appear on the right.
+5. The result is also saved to `output/`. Below it there is a **1:1 pixel comparison** (left: the input, nearest-neighbour enlarged so pixel blocks are visible; right: the result at native pixels) — browsers scale images to the window, which easily misleads you about real detail.
 
-For old photos: tick 「人脸修复 (GFPGAN)」 (Face Restoration) and keep the upscaling factor at 4;
-**去噪 (Denoise)** and **轻量去划痕 (Light Descratch)** under 「🧹 附加增强 (Extra Enhancements)」 process the input
-before upscaling (classic algorithms, no extra weights needed; too strong a denoise strength blurs away detail);
-**黑白上色 (B&W Colorization)** requires you to install and register a colorization engine first, otherwise that toggle does not appear.
+**For old / blurry photos**
+
+* Just tick 「**老照片模式**」 (Old-photo mode): it sets pre-restoration to JPEG-artifact removal, sharpness to 0.4
+  and turns the pre-denoise off in one click (you can still tweak everything afterwards);
+* **前置复原 (Pre-restoration)** runs *before* upscaling at the **input resolution**: JPEG-artifact removal / denoise
+  only, it never resizes — upscaling still belongs to the super-resolution model. The dropdown only appears once
+  the weights are installed (`python scripts/install.py --restore`);
+* Tick 「人脸修复 (GFPGAN)」 (Face Restoration) and keep the upscaling factor at 4;
+* **清晰度增强 (Sharpness enhancement)** defaults to **0.35** (contrast-adaptive sharpening, CAS): measured +44%
+  sharpness for only −0.57 dB PSNR. Try 0.5 for very blurry input; if halos or noise appear, go back to 0.2–0.3
+  or set 0 to disable it;
+* **去噪 (Denoise)** and **轻量去划痕 (Light Descratch)** process the input *before* upscaling (classic algorithms,
+  no extra weights). A stronger denoise is more likely to wipe out the little high-frequency detail that is left
+  (the default was lowered from 5 to 3). Do not stack a strong denoise on top of pre-restoration;
+* **黑白上色 (B&W Colorization)** requires you to install and register a colorization engine first.
+
+> On "why is it still not sharp": super-resolution adds *plausible* texture, it does not recover information that
+> was never recorded — the heavier the blur, the less structure the model can produce. We quantified this and
+> planned the follow-ups in [`docs/TODO-blurry-old-photos.md`](docs/TODO-blurry-old-photos.md).
+
+**Measured on a re-photographed blurry portrait (1081×1456)**, sharpness = Laplacian variance
+
+| Approach | Overall | Face |
+| --- | --- | --- |
+| Original | 20.3 | 14.8 |
+| **Upscaling only** | **6.1** | **7.3** |
+| Upscaling + sharpness 0.35 | 17.1 | 20.2 |
+| Pre-restoration → upscaling + sharpness | 17.6 | 18.8 |
+
+Practical conclusions:
+
+* **Upscaling without sharpening can end up softer than the original** (6.1 < 20.3) — for input that is already
+  soft and then enlarged, the model tends to produce a smooth result;
+* **Sharpness enhancement is the best value for money** — essentially free;
+* **Pre-restoration only pays off where JPEG blocking is obvious**: on this photo the main degradation was defocus,
+  so it added 0.5 points while being 8x slower (5s → 27s);
+* **Face restoration can distort an excessively blurry face** (in our sample the eyes were warped): it depends on
+  accurate facial landmarks. The info panel now reports `已应用 / 未检测到人脸 / 失败：…` — compare before deciding.
+
+**Processing order** (photo Tab):
+
+```
+pre-restoration (optional) → upscaling → single resample to target size → face restoration (optional) → sharpening
+```
 
 ### 📁 Batch Processing
 
@@ -420,10 +466,12 @@ Two buttons sit permanently at the top of the page (above the global settings), 
 | Parameter | Default | Description |
 | --- | --- | --- |
 | CUDA 设备 (CUDA device) | Auto-detected | On multi-GPU machines a specific device can be chosen; the displayed name and VRAM are runtime probing results |
-| 输出分辨率预设 (Output resolution preset) | 原始比例 (Original ratio) | After upscaling, Lanczos-resize by long edge; 「原始比例 (Original ratio)」 does not resize |
+| 输出分辨率预设 (Output resolution preset) | 原始比例 (Original ratio) | Resize by long edge with a **single** resample (area-average when shrinking); 「原始比例 (Original ratio)」 does not resize |
 | 基础模型 (Base model) | `RealESRGAN_x4plus.pth` | Available files from `model_weights/` |
 | 半精度推理 (FP16) (Half-precision inference) | On | Saves VRAM and is faster; turn it off if artifacts or anomalies appear |
 | 分块大小 tile (Tile size) | 0 (auto) | 0 means choose automatically from free VRAM; lower it manually when VRAM is tight (e.g. 200/300) |
+| 清晰度增强 (Sharpness enhancement) | 0.35 | Contrast-adaptive sharpening (CAS) applied after upscaling; 0 = off. 0.3–0.5 for blurry old photos; too high causes halos and noise |
+| 前置复原 (Pre-restoration) | 不使用 (off) | Same-size JPEG-artifact removal / denoise (SwinIR) at the input resolution, before upscaling; needs `scripts/install.py --restore` |
 | 超分倍率 (Upscaling factor) | 4.0 | Factor inherent to the base model; the result is then resized to the target resolution |
 | LoRA 权重 (LoRA weights) | 不使用 (None) | Convolutional LoRA, switchable at any time; does not affect native results when nothing is selected |
 | 输出格式 (Output format) | PNG / MP4 | Images PNG, JPG; video MP4, MKV (audio is copied directly in MKV) |

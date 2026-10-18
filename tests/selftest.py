@@ -58,6 +58,32 @@ def test_config_and_common() -> None:
     check("越权 LoRA 路径被拒绝", resolve_lora_path("/etc/passwd") is None)
     check("扫描 LoRA 目录不报错", isinstance(scan_lora_weights(), list))
 
+    # 安装脚本的参数解析（--all 应等价于三个可选组件全开）
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "pvsr_install", Path(__file__).resolve().parent.parent / "scripts" / "install.py"
+    )
+    installer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(installer)
+    parsed = installer.parse_args(["--all", "--dry-run"])
+    check("--all 打开全部可选组件",
+          parsed.maxine and parsed.gfpgan and parsed.restore and parsed.dry_run,
+          f"maxine={parsed.maxine} gfpgan={parsed.gfpgan} restore={parsed.restore}")
+    default_args = installer.parse_args([])
+    check("默认不装可选组件",
+          not (default_args.maxine or default_args.gfpgan or default_args.restore))
+
+    # 复原模型自检命令：直接执行安装脚本用的同一份代码，防止导入语句写错
+    installed_restore = [k for k in config.RESTORE_MODELS if config.restore_installed(k)]
+    if not installed_restore:
+        check("复原自检命令（未安装模型，跳过）", True, "未下载权重")
+    else:
+        ok_probe, probe_out = installer.python_check(installer.probe_command(installed_restore[0]))
+        check("复原自检命令可执行且通过",
+              ok_probe and probe_out.strip().startswith("OK"),
+              probe_out.strip().splitlines()[-1] if probe_out.strip() else "无输出")
+
 
 def test_ffmpeg_chain() -> None:
     section("FFmpeg 媒体链路")

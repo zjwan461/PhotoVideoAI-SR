@@ -19,6 +19,8 @@
     python scripts/install.py --cpu           # 装 CPU 版 PyTorch（仅用于看界面调试）
     python scripts/install.py --maxine        # 额外安装 Maxine VSR（nvidia-vfx，约 400 MB）
     python scripts/install.py --gfpgan        # 额外安装 GFPGAN 人脸修复（库 + 约 332 MB 权重）
+    python scripts/install.py --restore       # 额外下载前置复原模型（SwinIR，约 313 MB）
+    python scripts/install.py --all           # 以上全部 + lpips（共约 1.2 GB）
     python scripts/install.py --dry-run       # 只打印将要执行的命令
 
 脚本是幂等的：已经满足的步骤会跳过，可放心重复运行。
@@ -475,6 +477,121 @@ def install_gfpgan(args: argparse.Namespace) -> bool:
     return True
 
 
+def probe_command(key: str) -> str:
+    """构造复原模型自检的子进程代码。
+
+    单独成函数，测试可以直接执行**同一份**代码——避免这里写成
+    ``from src import config``（config 是顶层模块，不在 src 里）这类笔误只能等用户踩到。
+    """
+    return (
+        "import config\n"
+        "from src import restore\n"
+        f"ok, text = restore.probe('{key}')\n"
+        "print('OK' if ok else 'FAIL', text)\n"
+    )
+
+
+def install_restore(args: argparse.Namespace) -> bool:
+    """下载老照片前置复原模型的权重（SwinIR，可选）。
+
+    网络结构随 ``basicsr`` 一起提供（``basicsr.archs.swinir_arch``），
+    所以这一步**只下载权重**，不需要额外 pip 包。
+    """
+    section("安装前置复原模型（可选，老照片去压缩块/去噪）")
+
+    ok, output = python_check(
+        "import config, json;"
+        "print(json.dumps({"
+        "'dir': str(config.RESTORE_DIR),"
+        "'models': config.RESTORE_MODELS,"
+        "'missing': [k for k in config.RESTORE_MODELS if not config.restore_installed(k)]}))"
+    )
+    if not ok:
+        print("  ❌ 无法读取复原模型清单（项目模块导入失败）：")
+        print("\n".join(f"     {line}" for line in output.splitlines()[:5]))
+        return False
+
+    info = json.loads(output.strip().splitlines()[-1])
+    target_dir = Path(info["dir"])
+    models = info["models"]
+    missing = info["missing"]
+
+    if not missing:
+        print("  ✅ 复原模型都已就绪，跳过。")
+        return True
+
+    total = sum(models[key]["size_mb"] for key in missing)
+    print(f"  需要下载 {len(missing)} 个模型，共约 {total} MB → {target_dir}")
+    for key in missing:
+        entry = models[key]
+        print(f"  → {entry['label']}")
+        if args.dry_run:
+            print(f"  $ （dry-run）下载 {entry['url']}")
+            continue
+        if not download_file(
+            entry["url"], target_dir / entry["file"], min_bytes=20 * 1024 * 1024
+        ):
+            print(f"  ❌ {entry['file']} 下载失败。可手动下载后放到：{target_dir}")
+            print(f"     地址：{entry['url']}")
+            return False
+
+    if args.dry_run:
+        return True
+
+    ok, output = python_check(
+        "import config;"
+        "print('installed=', [k for k in config.RESTORE_MODELS if config.restore_installed(k)]);"
+        "print('restore_available=', config.restore_available())"
+    )
+    print("\n".join(f"  {line}" for line in output.splitlines()))
+    if not ok or "restore_available= True" not in output:
+        print("  ❌ 复原模型安装后仍不可用。")
+        return False
+
+    # 自检：复原模型对平坦输入应近似恒等；配置（img_range/channels）取错会静默失真
+    for key in missing:
+        ok_probe, text = python_check(probe_command(key))
+        line = (text or "").strip().splitlines()[-1] if (text or "").strip() else ""
+        if not ok_probe:
+            # 自检脚本本身跑不起来（不是权重的问题），不应该据此判定安装失败
+            print(f"  ⚠️ 无法执行 {key} 自检：{line[:120]}")
+            continue
+        if not line.startswith("OK"):
+            print(f"  ❌ {key} 自检未通过：{line[3:] if line.startswith('FAIL') else line}")
+            print("     该权重与当前架构配置可能不匹配，请不要使用。")
+            return False
+        print(f"  ✅ {key} 自检通过：{line[3:]}")
+
+    print("  ✅ 前置复原已可用（图片 Tab 会出现「前置复原」下拉）")
+    return True
+
+
+def install_lpips(args: argparse.Namespace) -> bool:
+    """安装可选依赖 lpips（LoRA 微调的感知损失）。
+
+    只是装库本身（很小）；它会在**首次使用时**才去下载 VGG 权重（约 500 MB），
+    所以这里不会产生额外的大文件。
+    """
+    section("安装可选依赖 lpips（微调感知损失）")
+    ok, _ = python_check("import lpips")
+    if ok:
+        print("  ✅ 已安装，跳过。")
+        return True
+    index = PYPI_CN if args.mirror == "cn" else None
+    if pip_install(["lpips>=0.1.4"], index=index, dry_run=args.dry_run) != 0:
+        print("  ❌ lpips 安装失败（不影响主流程，微调时会退回 L1 损失）。")
+        return False
+    if args.dry_run:
+        return True
+    ok, output = python_check("import lpips; print('lpips', lpips.__version__ if hasattr(lpips,'__version__') else 'ok')")
+    if not ok:
+        print("  ❌ lpips 安装后仍无法导入：")
+        print("\n".join(f"     {line}" for line in output.splitlines()[:4]))
+        return False
+    print("  ✅ lpips 已安装（首次用于微调时会下载 VGG 权重约 500 MB）")
+    return True
+
+
 def verify(args: argparse.Namespace) -> bool:
     section("验证安装结果")
     if args.dry_run:
@@ -508,7 +625,7 @@ def verify(args: argparse.Namespace) -> bool:
     return True
 
 
-def next_steps(*, maxine: bool = False, gfpgan: bool = False) -> None:
+def next_steps(*, maxine: bool = False, gfpgan: bool = False, restore: bool = False) -> None:
     section("下一步")
     print("  1) 放置基础模型（或让程序首次推理时自动下载）：")
     print(f"     {PROJECT_ROOT / 'model_weights' / 'RealESRGAN_x4plus.pth'}")
@@ -523,6 +640,9 @@ def next_steps(*, maxine: bool = False, gfpgan: bool = False) -> None:
     if not gfpgan:
         print("  5) 想用 GFPGAN 老照片人脸修复，再执行：")
         print(f"     {sys.executable} scripts/install.py --gfpgan")
+    if not restore:
+        print("  6) 想用老照片前置复原（去压缩块/去噪），再执行：")
+        print(f"     {sys.executable} scripts/install.py --restore")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -546,8 +666,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="额外安装 GFPGAN 人脸修复（库 + 约 332 MB 权重，可选）")
     parser.add_argument("--gfpgan-url", default=None,
                         help=f"GFPGAN 权重下载地址（默认官方 GitHub Releases）")
+    parser.add_argument("--restore", action="store_true",
+                        help="额外下载老照片前置复原模型（SwinIR，约 313 MB，可选）")
+    parser.add_argument("--all", action="store_true",
+                        help="安装全部可选组件：--maxine --gfpgan --restore，外加 lpips"
+                             "（共约 1.2 GB 下载，耗时取决于网速）")
     parser.add_argument("--dry-run", action="store_true", help="只打印命令，不执行")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.all:
+        # --all 只是把三个开关一起打开，后续逻辑与逐个传参完全一致
+        args.maxine = True
+        args.gfpgan = True
+        args.restore = True
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -579,10 +710,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.gfpgan:
         if not install_gfpgan(args):
             return 1
+    if args.restore:
+        if not install_restore(args):
+            return 1
+    if args.all:
+        # lpips 只用于微调的感知损失，装不上也不影响主流程，因此只警告不中断
+        if not install_lpips(args):
+            print("  ⚠️ lpips 未装上，其余组件不受影响（微调时会自动退回 L1 损失）。")
     if not verify(args):
         return 1
 
-    next_steps(maxine=args.maxine, gfpgan=args.gfpgan)
+    next_steps(maxine=args.maxine, gfpgan=args.gfpgan, restore=args.restore)
     print("\n完成。")
     return 0
 

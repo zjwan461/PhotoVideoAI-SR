@@ -153,6 +153,117 @@ GFPGAN_MODEL_URL: str = (
 )
 
 # --------------------------------------------------------------------------- #
+# 老照片前置复原（P4-2，可选）
+# --------------------------------------------------------------------------- #
+#: 复原模型的权重目录（与「放大模型」分开，避免混在一起）
+RESTORE_DIR: Path = Path(os.environ.get("PVSR_RESTORE_DIR", MODEL_DIR / "restore"))
+
+#: 前置复原模型清单。复原一律**同尺寸**：只做去压缩块 / 去噪，放大仍交给超分模型。
+#: 架构参数与官方 SwinIR 推理脚本一致，网络实现直接复用 basicsr.archs.swinir_arch。
+RESTORE_MODELS: dict[str, dict] = {
+    "jpeg": {
+        "file": "swinir_colorcar_jpeg40.pth",
+        "label": "去压缩块 · 彩色（JPEG / 扫图 / 网图，推荐）",
+        "desc": "SwinIR-M 彩色 JPEG 压缩伪影去除（质量 40 档训练）",
+        "size_mb": 98,
+        "channels": "rgb",
+        "url": (
+            "https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/"
+            "006_colorCAR_DFWB_s126w7_SwinIR-M_jpeg40.pth"
+        ),
+        "arch": {
+            # 注意：CAR（去压缩块）系列的 img_range 是 255，而 DN（去噪）是 1，
+            # 这是官方脚本里的说明（"use img_range=255 because it's slightly better than 1"）。
+            # 取错会让输出整体偏移、画面严重失真。
+            "upscale": 1, "in_chans": 3, "img_size": 126, "window_size": 7,
+            "img_range": 255.0, "depths": [6] * 6, "embed_dim": 180,
+            "num_heads": [6] * 6, "mlp_ratio": 2, "upsampler": "",
+            "resi_connection": "1conv",
+        },
+        "scale": 1,
+    },
+    "gjpeg": {
+        "file": "swinir_car_jpeg40.pth",
+        "label": "去压缩块 · 黑白（只在亮度通道复原）",
+        "desc": "SwinIR-M 灰度 JPEG 伪影去除；黑白老照片用它最合适，彩色图也能用",
+        "size_mb": 98,
+        "channels": "y",
+        "url": (
+            "https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/"
+            "006_CAR_DFWB_s126w7_SwinIR-M_jpeg40.pth"
+        ),
+        "arch": {
+            "upscale": 1, "in_chans": 1, "img_size": 126, "window_size": 7,
+            "img_range": 255.0, "depths": [6] * 6, "embed_dim": 180,
+            "num_heads": [6] * 6, "mlp_ratio": 2, "upsampler": "",
+            "resi_connection": "1conv",
+        },
+        "scale": 1,
+    },
+    "denoise": {
+        "file": "swinir_colordn_noise25.pth",
+        "label": "去噪 · 彩色（胶片颗粒 / 高感噪点）",
+        "desc": "SwinIR-M 彩色图像去噪（噪声等级 25）",
+        "size_mb": 117,
+        "channels": "rgb",
+        "url": (
+            "https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/"
+            "005_colorDN_DFWB_s128w8_SwinIR-M_noise25.pth"
+        ),
+        "arch": {
+            "upscale": 1, "in_chans": 3, "img_size": 128, "window_size": 8,
+            "img_range": 1.0, "depths": [6] * 6, "embed_dim": 180,
+            "num_heads": [6] * 6, "mlp_ratio": 2, "upsampler": "",
+            "resi_connection": "1conv",
+        },
+        "scale": 1,
+    },
+}
+
+#: 分块推理尺寸（SwinIR 显存随边长平方增长，大图必须分块）
+RESTORE_TILE: int = int(os.environ.get("PVSR_RESTORE_TILE", "384"))
+
+#: 不在下拉里展示复原功能
+NO_RESTORE: str = "不使用前置复原"
+
+
+def restore_model_path(key: str) -> Path:
+    """某个复原模型的权重路径。"""
+    entry = RESTORE_MODELS.get(key)
+    name = entry["file"] if entry else key
+    return RESTORE_DIR / name
+
+
+def restore_installed(key: str) -> bool:
+    """权重是否已下载。"""
+    return key in RESTORE_MODELS and restore_model_path(key).is_file()
+
+
+def restore_choices() -> list[str]:
+    """生成 UI 下拉选项：占位项 + 已安装的复原模型。"""
+    options = [NO_RESTORE]
+    for key, entry in RESTORE_MODELS.items():
+        if restore_installed(key):
+            options.append(f"{entry['label']} [{key}]")
+    return options
+
+
+def parse_restore_choice(choice: str | None) -> str | None:
+    """把下拉选项解析成模型 key；占位项或非法输入返回 None。"""
+    if not choice or choice == NO_RESTORE:
+        return None
+    for key, entry in RESTORE_MODELS.items():
+        if choice == f"{entry['label']} [{key}]":
+            return key
+    # 容错：允许直接传 key
+    return choice if choice in RESTORE_MODELS else None
+
+
+def restore_available() -> bool:
+    """是否至少装了一个复原模型（用于决定 UI 是否显示该控件）。"""
+    return any(restore_installed(key) for key in RESTORE_MODELS)
+
+# --------------------------------------------------------------------------- #
 # 全局运行参数
 # --------------------------------------------------------------------------- #
 HALF_PRECISION: bool = os.environ.get("PVSR_HALF", "1") not in ("0", "false", "False")
@@ -451,6 +562,11 @@ def runtime_summary() -> str:
     else:
         lines.append("CUDA: 未检测到可用设备")
     lines.append(f"Maxine VSR: {'可用' if maxine_available() else '不可用 (已隐藏)'}")
+    installed_restore = [key for key in RESTORE_MODELS if restore_installed(key)]
+    if installed_restore:
+        lines.append(f"前置复原: 可用 ({'、'.join(installed_restore)})")
+    else:
+        lines.append("前置复原: 不可用 (未下载权重，已隐藏)")
     if gfpgan_available():
         lines.append("GFPGAN: 可用")
     elif not gfpgan_weights_path().is_file():

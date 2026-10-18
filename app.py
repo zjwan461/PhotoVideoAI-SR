@@ -31,6 +31,7 @@ from src import (  # noqa: E402
     ffmpeg_installer,
     ffmpeg_utils,
     img_sr,
+    restore,
     task_control,
 )
 from src import video_sr_maxine as maxine_mod  # noqa: E402
@@ -215,6 +216,13 @@ def handle_release_vram():
     else:
         clear_cuda_cache()
 
+    # 前置复原模型也占显存，一并卸载
+    restore_engine = restore.get_engine()
+    restore_was_loaded = restore_engine.ready
+    restore_key = restore_engine.key
+    if restore_was_loaded:
+        restore_engine.unload()
+
     after = get_free_vram_gb(index)
     logger.info("释放显存：cuda:%d 空闲 %s -> %s GB", index, before, after)
 
@@ -225,6 +233,8 @@ def handle_release_vram():
             rows.append(("同时卸载的 LoRA", f"`{lora_name}`"))
     else:
         rows.append(("卸载的模型", "无（此前未加载模型，仅回收缓存）"))
+    if restore_was_loaded:
+        rows.append(("同时卸载的前置复原", f"`{restore_key}`"))
     rows.append(("设备", f"cuda:{index}" + (f"（共 {total} GB）" if total else "")))
     if before is not None and after is not None:
         rows.append(("空闲显存", f"{before:.2f} GB → **{after:.2f} GB**"))
@@ -294,6 +304,77 @@ def handle_install_ffmpeg(progress=gr.Progress()):
 # --------------------------------------------------------------------------- #
 # Tab1：图片超分
 # --------------------------------------------------------------------------- #
+def one_to_one_compare(original, result, *, patch: int = 420):
+    """生成 1:1 像素对比图：左「原图（最近邻放大）」右「结果」。
+
+    为什么需要它：超分后浏览器通常按窗口缩放显示，图越大反而越显得软，
+    很难判断细节到底有没有变清楚。这里取同一块中心区域、按原始像素密度并排：
+    左图用最近邻放大到与右侧同尺寸（像素块可见，不做任何平滑），
+    右侧是结果的原样像素，二者可比。
+
+    Returns:
+        ``(H, W, 3)`` 的 RGB uint8 数组；输入不可用时返回 None。
+    """
+    if original is None or result is None:
+        return None
+    if getattr(original, "size", 0) == 0 or getattr(result, "size", 0) == 0:
+        return None
+    try:
+        import cv2
+        import numpy as np
+
+        res = result[:, :, :3] if result.ndim == 3 and result.shape[2] == 4 else result
+        org = original[:, :, :3] if original.ndim == 3 and original.shape[2] == 4 else original
+        height, width = res.shape[:2]
+        ph, pw = min(patch, height), min(patch, width)
+        if ph < 8 or pw < 8:
+            return None
+
+        y0 = max(0, height // 2 - ph // 2)
+        x0 = max(0, width // 2 - pw // 2)
+        res_patch = res[y0:y0 + ph, x0:x0 + pw]
+
+        scale = width / float(org.shape[1])
+        ow = max(1, int(round(pw / scale)))
+        oh = max(1, int(round(ph / scale)))
+        ox0 = min(max(0, int(x0 / scale)), max(0, org.shape[1] - ow))
+        oy0 = min(max(0, int(y0 / scale)), max(0, org.shape[0] - oh))
+        org_patch = org[oy0:oy0 + oh, ox0:ox0 + ow]
+        org_big = cv2.resize(org_patch, (pw, ph), interpolation=cv2.INTER_NEAREST)
+
+        gap = 6
+        canvas = np.full((ph + 24, pw * 2 + gap, 3), 24, dtype=np.uint8)
+        canvas[24:, :pw] = np.ascontiguousarray(org_big)
+        canvas[24:, pw + gap:] = np.ascontiguousarray(res_patch)
+        # 标签用英文：cv2.putText 不支持中文字形（与验证预览图一致）
+        cv2.putText(canvas, "input (nearest)", (6, 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1, cv2.LINE_AA)
+        cv2.putText(canvas, "result 1:1", (pw + gap + 6, 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1, cv2.LINE_AA)
+        return canvas
+    except Exception as exc:  # noqa: BLE001 - 对比图失败不应影响主结果
+        logger.debug("生成 1:1 对比图失败（已忽略）：%s", exc)
+        return None
+
+
+@safe_handler("老照片模式")
+def handle_retro_mode(enabled):
+    """「老照片模式」：一键套用推荐参数（套用后仍可手动微调）。
+
+    推荐组合：关闭前置去噪（避免二次抹掉仅存的高频）→ 开启前置复原（去压缩块）
+    → 清晰度增强 0.4。人脸修复不自动改，尊重用户自己的选择。
+    """
+    if not enabled:
+        return gr.update(), gr.update(), gr.update()
+    choices = config.restore_choices()
+    restore_value = choices[1] if len(choices) > 1 else config.NO_RESTORE
+    return (
+        gr.update(value=False),           # 去噪：关
+        gr.update(value=restore_value),   # 前置复原：优先「去压缩块」
+        gr.update(value=0.4),             # 清晰度增强
+    )
+
+
 @safe_handler("图片超分")
 def handle_image(
     image,
@@ -308,9 +389,11 @@ def handle_image(
     face_restore,
     image_format,
     denoise_enabled=False,
-    denoise_strength=5.0,
+    denoise_strength=3.0,
     scratch_enabled=False,
     colorize_enabled=False,
+    restore_choice=config.NO_RESTORE,
+    sharpen_strength=0.35,
     progress=gr.Progress(),
 ):
     """单张图片超分处理器（含可选的老照片附加增强）。"""
@@ -357,6 +440,8 @@ def handle_image(
             tile=int(tile_size) or None,
             auto_download=bool(auto_download),
             face_restore=bool(face_restore),
+            sharpen=float(sharpen_strength or 0.0),
+            restore=config.parse_restore_choice(restore_choice),
             progress=lambda value, text: progress(value, desc=text),
             should_cancel=token.raise_if_cancelled,
         )
@@ -382,10 +467,18 @@ def handle_image(
 
     if extras_applied:
         saved_note += "\n\n附加处理：" + "、".join(extras_applied)
+    if info.get("restore"):
+        entry = config.RESTORE_MODELS.get(info["restore"], {})
+        saved_note += f"\n\n前置复原：{entry.get('label', info['restore'])}"
+    if info.get("face_restore") and info["face_restore"] != "未启用":
+        saved_note += f"\n\n人脸修复：{info['face_restore']}"
+    if info.get("sharpen"):
+        saved_note += f"\n\n清晰度增强：{info['sharpen']:g}（超分后锐化）"
 
     log_task("图片超分", {"model": model_name, "preset": preset_name, "lora": lora_selection},
              info["elapsed"], get_device_summary(device))
-    return result, info_panel_html(info) + saved_note
+    comparison = one_to_one_compare(prepared, result)
+    return result, info_panel_html(info) + saved_note, comparison
 
 
 @safe_handler("批量图片超分")
@@ -581,6 +674,53 @@ def preview_video_info(video_path):
         return "**源视频信息：** " + ffmpeg_utils.format_video_info(info)
     except ffmpeg_utils.FFmpegError as exc:
         return f"⚠️ 无法读取视频信息：{exc}"
+
+
+@safe_handler("读取图片信息")
+def preview_image_info(image, preset_name, outscale):
+    """上传图片后立即展示源图信息与预计输出（与视频 Tab 的源信息对应）。
+
+    除了尺寸/通道这类静态信息，还会按当前「输出分辨率预设」和「超分倍率」
+    预测最终像素尺寸与所需显存——这三个控件任一变化都会刷新。
+    """
+    if image is None or getattr(image, "size", 0) == 0:
+        return "_上传图片后显示图片信息_"
+    try:
+        height, width = int(image.shape[0]), int(image.shape[1])
+        channels = 1 if image.ndim == 2 else int(image.shape[2])
+        mode = {1: "灰度", 2: "灰度+Alpha", 3: "RGB", 4: "RGBA（含透明通道）"}.get(
+            channels, f"{channels} 通道"
+        )
+        megapixels = width * height / 1e6
+        if width == height:
+            shape = "方形"
+        elif width > height:
+            shape = "横图"
+        else:
+            shape = "竖图"
+        ratio = width / float(height) if height else 0.0
+
+        target = img_sr.resolve_target_long_edge(preset_name)
+        out_w, out_h = img_sr.plan_output_size(
+            width, height, outscale=float(outscale or 4.0), target_long_edge=target
+        )
+        vram = img_sr.estimate_required_vram_gb(target, float(outscale or 4.0))
+        factor = out_w / float(width) if width else 0.0
+
+        parts = [
+            f"**{width} × {height}**（{shape}，比例 {ratio:.2f}）",
+            mode,
+            f"{megapixels:.1f} MP",
+            f"预计输出 **{out_w} × {out_h}**（{factor:.2f}×）",
+        ]
+        if target:
+            parts.append(f"预设长边 {target}")
+        parts.append(f"预计显存 ≈ {vram:g} GB")
+        if channels == 4:
+            parts.append("⚠️ 透明通道会一并放大")
+        return "**源图信息：** " + " · ".join(parts)
+    except Exception as exc:  # noqa: BLE001
+        return f"⚠️ 无法读取图片信息：{exc}"
 
 
 # --------------------------------------------------------------------------- #
@@ -901,6 +1041,7 @@ def build_interface() -> gr.Blocks:
                 with gr.Row():
                     with gr.Column():
                         image_in = gr.Image(type="numpy", label="输入图片", height=340)
+                        image_source_info = gr.Markdown("_上传图片后显示图片信息_")
                         with gr.Row():
                             lora_dd_img = gr.Dropdown(
                                 choices=lora_items, value=NO_LORA, label="LoRA 权重",
@@ -912,17 +1053,35 @@ def build_interface() -> gr.Blocks:
                             )
                         face_cb = gr.Checkbox(
                             value=False, label="老照片附加：人脸修复 (GFPGAN)",
-                            info="可选依赖，未安装时会自动提示",
+                            info="可选依赖，未安装时会自动提示；过度模糊的脸可能被修歪，建议对比后再决定",
                             visible=config.gfpgan_available(),
                         )
-                        with gr.Accordion("🧹 附加增强（可选，传统算法，不需要额外权重）", open=False):
+                        with gr.Accordion("🧹 附加增强（可选，传统算法，不需要额外权重）", open=True):
+                            retro_cb = gr.Checkbox(
+                                value=False, label="老照片模式（一键套用推荐参数）",
+                                info="自动关闭过强去噪、开启前置复原与清晰度增强；选完仍可手动微调",
+                            )
+                            restore_dd = gr.Dropdown(
+                                choices=config.restore_choices(),
+                                value=config.NO_RESTORE,
+                                label="前置复原（超分前，同尺寸）",
+                                info="去压缩块 / 去噪；不会放大，放大仍交给超分。"
+                                     "缺少权重时执行 python scripts/install.py --restore",
+                                visible=config.restore_available(),
+                            )
                             with gr.Row():
                                 denoise_cb = gr.Checkbox(
                                     value=False, label="去噪", info="超分前对输入做非局部均值去噪"
                                 )
                                 denoise_sl = gr.Slider(
-                                    1, 15, value=5, step=1, label="去噪强度",
-                                    info="越大越平滑，也越容易糊掉细节",
+                                    1, 15, value=3, step=1, label="去噪强度",
+                                    info="越大越平滑；过强会把仅存的高频一起抹掉，反而不清晰",
+                                )
+                            with gr.Row():
+                                sharpen_sl = gr.Slider(
+                                    0.0, 1.0, value=0.35, step=0.05,
+                                    label="清晰度增强（超分后，0 = 关闭）",
+                                    info="对比度自适应锐化；模糊老照片建议 0.3~0.5，过大易出光晕/噪点",
                                 )
                             scratch_cb = gr.Checkbox(
                                 value=False, label="轻量去划痕 / 去尘点",
@@ -937,12 +1096,29 @@ def build_interface() -> gr.Blocks:
                     with gr.Column():
                         image_out = gr.Image(label="超分结果", height=420)
                         image_info = gr.Markdown("_暂无任务信息_")
+                        compare_out = gr.Image(
+                            label="1:1 像素对比（左：原图，右：结果）", height=240,
+                            show_download_button=True,
+                        )
                 image_btn.click(
                     handle_image,
                     inputs=[image_in, preset_dd, device_dd, model_dd, lora_dd_img, half_cb,
                             outscale_sl, tile_sl, auto_download_cb, face_cb, img_fmt_dd,
-                            denoise_cb, denoise_sl, scratch_cb, colorize_cb],
-                    outputs=[image_out, image_info],
+                            denoise_cb, denoise_sl, scratch_cb, colorize_cb,
+                            restore_dd, sharpen_sl],
+                    outputs=[image_out, image_info, compare_out],
+                )
+                # 源图信息：上传后立即显示，预设/倍率变化时同步刷新
+                for trigger in (image_in, preset_dd, outscale_sl):
+                    trigger.change(
+                        preview_image_info,
+                        inputs=[image_in, preset_dd, outscale_sl],
+                        outputs=[image_source_info],
+                    )
+                retro_cb.change(
+                    handle_retro_mode,
+                    inputs=[retro_cb],
+                    outputs=[denoise_cb, restore_dd, sharpen_sl],
                 )
 
                 gr.Markdown("---\n### 📁 批量处理（P1）")

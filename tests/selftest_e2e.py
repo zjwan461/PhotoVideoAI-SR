@@ -87,6 +87,14 @@ def _make_photo(width: int = 320, height: int = 240):
     return image
 
 
+def _sharpness(image) -> float:
+    """无参考清晰度：灰度图 Laplacian 方差（同尺寸下可比）。"""
+    import cv2
+
+    gray = cv2.cvtColor(image[:, :, :3], cv2.COLOR_RGB2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
 def _face_image():
     """取一张真实人脸图（scikit-image 自带的 NASA 宇航员照，公有领域）。
 
@@ -140,6 +148,9 @@ def _make_clip(path: Path, seconds: float = 1.0) -> bool:
 # --------------------------------------------------------------------------- #
 def test_image(device: str) -> None:
     section("图片超分（真实权重 + 4K 预设 + FP16）")
+    import cv2
+
+    import app
     from src import img_sr
 
     photo = _make_photo()
@@ -158,6 +169,78 @@ def test_image(device: str) -> None:
     check("设备参数已归一化", info["device"] == config.normalize_device(device),
           f"info.device={info['device']!r}")
     check("耗时在合理范围", 0 < elapsed < 120, f"{elapsed:.2f}s")
+
+    # 缩放链路：预设优先于倍率，且只做一次重采样（尺寸语义不能变）
+    _, info_x2 = img_sr.upscale_image(
+        photo, preset_name="720p (1280x720)", device=device, half=True,
+        outscale=2.0, auto_download=False,
+    )
+    check("预设优先于倍率（outscale=2 仍按 720p）",
+          info_x2["output_size"] == "1280x960", info_x2["output_size"])
+    _, info_raw = img_sr.upscale_image(
+        photo, preset_name="原始比例 (不限制长边)", device=device, half=True,
+        outscale=2.0, auto_download=False,
+    )
+    check("无预设时按倍率输出（x2）",
+          info_raw["output_size"] == f"{photo.shape[1] * 2}x{photo.shape[0] * 2}",
+          info_raw["output_size"])
+
+    # 清晰度增强（P4-1）：锐度上升、尺寸不变
+    blurred = cv2.GaussianBlur(photo, (0, 0), 2.0)
+    plain, _ = img_sr.upscale_image(
+        blurred, preset_name="1080p (1920x1080)", device=device, half=True,
+        outscale=4.0, auto_download=False,
+    )
+    sharpened, info_s = img_sr.upscale_image(
+        blurred, preset_name="1080p (1920x1080)", device=device, half=True,
+        outscale=4.0, auto_download=False, sharpen=0.35,
+    )
+    check("清晰度增强不改变尺寸", sharpened.shape == plain.shape,
+          f"{sharpened.shape[:2]} vs {plain.shape[:2]}")
+    before, after = _sharpness(plain), _sharpness(sharpened)
+    check("清晰度增强提升锐度（≥10%）", after > before * 1.10,
+          f"Laplacian {before:.0f} → {after:.0f}")
+    check("info 记录了增强强度", info_s.get("sharpen") == 0.35, str(info_s.get("sharpen")))
+
+    # 1:1 对比图（UI 用）
+    comparison = app.one_to_one_compare(blurred, sharpened)
+    check("生成 1:1 对比图", comparison is not None and comparison.ndim == 3,
+          f"{comparison.shape if comparison is not None else None}")
+
+    # 前置复原（P4-2）：先验网络结构（不需要权重），有权重再验端到端
+    import torch
+
+    from src import restore as restore_mod
+
+    if not restore_mod.HAS_SWINIR:
+        skip("前置复原网络结构", restore_mod.SWINIR_IMPORT_ERROR[:80])
+    else:
+        for restore_key in ("jpeg", "denoise"):
+            net = restore_mod.build_network(restore_key).eval()
+            window = int(config.RESTORE_MODELS[restore_key]["arch"]["window_size"])
+            with torch.inference_mode():
+                out = restore_mod._tiled_forward(
+                    net, torch.rand(1, 3, 64, 80), tile=64, window=window
+                )
+            check(f"复原网络结构可用（{restore_key}）",
+                  tuple(out.shape[-2:]) == (64, 80), str(tuple(out.shape)))
+
+    installed_restore = [k for k in config.RESTORE_MODELS if config.restore_installed(k)]
+    if not installed_restore:
+        skip("前置复原端到端", "未下载权重（python scripts/install.py --restore）")
+    else:
+        for restore_key in installed_restore:
+            ok, text = restore_mod.probe(restore_key)
+            check(f"复原模型自检（{restore_key}）", ok, text)
+        restore_key = installed_restore[0]
+        restored, info_r = img_sr.upscale_image(
+            blurred, preset_name="1080p (1920x1080)", device=device, half=True,
+            outscale=4.0, auto_download=False, restore=restore_key,
+        )
+        check("前置复原不改变输出尺寸", restored.shape == plain.shape,
+              f"{restored.shape[:2]} vs {plain.shape[:2]}")
+        check("info 记录了复原模型", info_r.get("restore") == restore_key,
+              str(info_r.get("restore")))
 
     # GFPGAN 人脸修复（可选组件）：装了才测
     if not config.gfpgan_available():
@@ -584,16 +667,38 @@ def test_ui(device: str, work: Path) -> None:
 
     # 直接调用照片 Tab 的处理器（等价于点按钮）
     progress = PlainProgress()
-    image, info_md = app.handle_image(
+    image, info_md, comparison = app.handle_image(
         _make_photo(), "1080p (1920x1080)", device, config.DEFAULT_MODEL_NAME,
         app.NO_LORA, True, 4.0, 0, False, False, "PNG",
-        False, 5.0, False, False,
+        False, 3.0, False, False, config.NO_RESTORE, 0.35,
         progress=progress,
     )
     check("照片 Tab 处理器可用", getattr(image, "size", 0) > 0
           and max(image.shape[:2]) == 1920, f"{image.shape[1]}x{image.shape[0]}")
     check("任务信息面板已生成", "输出分辨率" in info_md)
+    check("信息面板标注清晰度增强", "清晰度增强" in info_md)
+    check("返回 1:1 对比图", comparison is not None and comparison.ndim == 3,
+          f"{comparison.shape if comparison is not None else None}")
     check("进度回调被调用", bool(progress.calls), f"{len(progress.calls)} 次")
+
+    # 源图信息（上传后立即展示，与视频 Tab 对应）
+    source_info = app.preview_image_info(_make_photo(), "1080p (1920x1080)", 4.0)
+    check("源图信息含尺寸与预计输出",
+          "源图信息" in source_info and "预计输出" in source_info, source_info[:70])
+    check("未上传时给出占位",
+          "上传图片后" in app.preview_image_info(None, "1080p (1920x1080)", 4.0))
+    check("预设变化会改变预计输出",
+          app.preview_image_info(_make_photo(), "4K (3840x2160)", 4.0)
+          != app.preview_image_info(_make_photo(), "720p (1280x720)", 4.0))
+
+    # 老照片模式：一键套用推荐参数
+    updates = app.handle_retro_mode(True)
+    check("老照片模式返回 3 个控件更新",
+          len(updates) == 3 and updates[2].get("value") == 0.4, str(updates[2]))
+    check("老照片模式关闭过强去噪", updates[0].get("value") is False)
+    idle = app.handle_retro_mode(False)
+    check("关闭老照片模式不改变其它参数",
+          all("value" not in item for item in idle), str(idle))
 
     # 退化预览（微调 Tab）
     data_dir = work / "hr"

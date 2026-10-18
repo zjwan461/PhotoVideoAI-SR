@@ -346,8 +346,35 @@ def write_image(path: str | Path, image_rgb) -> Path:
     return target
 
 
+def _target_size(width: int, height: int, *, outscale: float, target_long_edge: int) -> tuple[int, int]:
+    """按「输入尺寸 + 倍率/预设」直接算出最终像素尺寸。
+
+    关键点：**不经过中间缩放**。旧实现是「模型 4× → enhance 内部 Lanczos 缩到
+    outscale → 再 Lanczos 缩到预设长边」，一次输出最多经历三次重采样，
+    每次下采样都会低通，正是「越放大越软」的来源之一。
+    """
+    if target_long_edge and target_long_edge > 0:
+        scale = target_long_edge / float(max(width, height))
+    else:
+        scale = float(outscale)
+    return max(1, int(round(width * scale))), max(1, int(round(height * scale)))
+
+
+def _resize_once(image, size: tuple[int, int]):
+    """单次高质量重采样：**缩小用面积平均**，放大用 Lanczos。"""
+    width, height = int(size[0]), int(size[1])
+    if image.shape[1] == width and image.shape[0] == height:
+        return image
+    shrinking = width < image.shape[1] or height < image.shape[0]
+    interpolation = cv2.INTER_AREA if shrinking else cv2.INTER_LANCZOS4
+    return cv2.resize(image, (width, height), interpolation=interpolation)
+
+
 def resize_to_long_edge(image, long_edge: int):
-    """用 Lanczos 把图片等比缩放到指定长边。
+    """用高质量插值把图片等比缩放到指定长边。
+
+    放大用 Lanczos（保留细节），**缩小用面积平均**——Lanczos 做下采样会带来
+    低通与轻微振铃，是「先 4 倍再缩回」时画面发软的常见原因。
 
     Args:
         long_edge: 目标长边像素；<=0 表示不缩放（原样返回）。
@@ -361,7 +388,7 @@ def resize_to_long_edge(image, long_edge: int):
         return image
     scale = long_edge / float(current_long)
     new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
-    return cv2.resize(image, new_size, interpolation=cv2.INTER_LANCZOS4)
+    return _resize_once(image, new_size)
 
 
 def resolve_target_long_edge(preset_name: str | None) -> int:
@@ -597,13 +624,18 @@ class RealESRGANEngine:
         face_restore: bool = False,
         face_restorer=None,
         should_cancel: Callable[[], None] | None = None,
+        sharpen: float = 0.0,
     ):
-        """对单张 RGB 图片做超分，并按需 Lanczos 缩放到目标长边。
+        """对单张 RGB 图片做超分，并按需缩放到目标尺寸。
+
+        缩放策略：模型固定按固有倍率（4×）出图，然后**只做一次**重采样到最终尺寸
+        （缩小用面积平均、放大用 Lanczos），避免「多重缩放」把画面越缩越软。
 
         Args:
             should_cancel: 可选的取消检查回调。传入时会在网络的**块级**子模块上
                 挂 forward 前钩子，因此取消能在一次前向（约 0.3~0.5 秒）内生效，
                 而不是等整张图跑完。
+            sharpen: 0~1 的清晰度增强强度（超分后处理），0 表示不做。
         """
         _import_numpy()
         if not self.ready:
@@ -620,10 +652,13 @@ class RealESRGANEngine:
             alpha = None
 
         bgr = rgb_to_bgr(rgb)
+        # 统一按模型固有倍率出图；最终尺寸由下面**一次**缩放决定，
+        # 避免 enhance 内部先 Lanczos 缩到 outscale、再缩到预设长边的多次重采样。
+        native = float(self.scale) or 4.0
         hooks = _install_cancel_hooks(self.upsampler.model, should_cancel)
         try:
             output, _ = self.upsampler.enhance(
-                bgr, outscale=float(outscale), alpha_upsampler="realesrgan"
+                bgr, outscale=native, alpha_upsampler="realesrgan"
             )
         except TaskCancelled:
             raise
@@ -643,6 +678,19 @@ class RealESRGANEngine:
 
         result = bgr_to_rgb(output)
 
+        # 单次重采样到最终尺寸（缩小面积平均 / 放大 Lanczos）
+        final_w, final_h = _target_size(
+            rgb.shape[1],
+            rgb.shape[0],
+            outscale=outscale,
+            target_long_edge=target_long_edge,
+        )
+        result = _resize_once(result, (final_w, final_h))
+
+        # 人脸修复放在**最终尺寸**上做：
+        # 1) 检测器在 4 倍原生尺寸上经常定位不到人脸（实测本机样例：4x 上不生效、
+        #    缩到 2x/1.5x 就能检测到），放在最后才可靠；
+        # 2) 也省算力——不必在 25 MP 上跑一遍 GFPGAN。
         if face_restore and face_restorer is not None:
             try:
                 result = face_restorer.restore(result)
@@ -650,22 +698,13 @@ class RealESRGANEngine:
                 logger.warning("人脸修复失败，已跳过：%s", exc)
 
         if alpha is not None:
-            alpha_up = cv2.resize(
-                alpha,
-                (result.shape[1], result.shape[0]),
-                interpolation=cv2.INTER_LANCZOS4,
-            )
+            alpha_up = _resize_once(alpha, (result.shape[1], result.shape[0]))
             result = np.dstack([result, alpha_up])
 
-        if target_long_edge:
-            if result.shape[2] == 4:
-                rgb_part = resize_to_long_edge(result[:, :, :3], target_long_edge)
-                alpha_part = cv2.resize(
-                    result[:, :, 3], (rgb_part.shape[1], rgb_part.shape[0]), interpolation=cv2.INTER_LANCZOS4
-                )
-                result = np.dstack([rgb_part, alpha_part])
-            else:
-                result = resize_to_long_edge(result, target_long_edge)
+        if sharpen and float(sharpen) > 0:
+            from src import enhance_extras
+
+            result = enhance_extras.sharpen_image(result, strength=float(sharpen))
 
         return result
 
@@ -731,9 +770,11 @@ class FaceRestorer:
             device=device,
         )
         self.device = device
+        #: 最近一次 restore() 的结果说明（供 UI 展示，避免「以为开了其实没生效」）
+        self.last_status = "未运行"
 
     def restore(self, image_rgb):
-        """对整图做人脸修复，返回 RGB 数组。"""
+        """对整图做人脸修复，返回 RGB 数组（同尺寸）。"""
         _import_numpy()
         try:
             _cropped, _restored, restored_img = self.restorer.enhance(
@@ -744,8 +785,11 @@ class FaceRestorer:
                 weight=0.5,
             )
         except Exception as exc:  # noqa: BLE001
+            self.last_status = f"失败：{exc}"
             raise ImageSRError(f"人脸修复失败：{exc}") from exc
         if restored_img is None:
+            # 没有人脸（或检测器没定位到）：原样返回，但要如实记录
+            self.last_status = "未检测到人脸"
             return image_rgb
         restored = bgr_to_rgb(restored_img)
         # 契约：restore() 必须返回与原图同尺寸的图。GFPGAN 的 upscale 若不为 1
@@ -756,12 +800,28 @@ class FaceRestorer:
                 (image_rgb.shape[1], image_rgb.shape[0]),
                 interpolation=cv2.INTER_LANCZOS4,
             )
+        self.last_status = "已应用"
         return restored
 
 
 # --------------------------------------------------------------------------- #
 # 对外主入口
 # --------------------------------------------------------------------------- #
+def plan_output_size(
+    width: int,
+    height: int,
+    *,
+    outscale: float = 4.0,
+    target_long_edge: int = 0,
+) -> tuple[int, int]:
+    """预测最终输出像素尺寸。
+
+    与 :meth:`RealESRGANEngine.upscale` 内部用的是同一套计算，所以 UI 上的
+    「预计输出」不会和实际结果对不上。
+    """
+    return _target_size(width, height, outscale=outscale, target_long_edge=target_long_edge)
+
+
 def estimate_required_vram_gb(target_long_edge: int = 0, outscale: float = 4.0) -> float:
     """粗略估算图片超分所需显存（GiB）。"""
     base = 2.5 + 0.8 * max(1.0, float(outscale))
@@ -784,6 +844,8 @@ def upscale_image(
     tile: int | None = None,
     auto_download: bool = True,
     face_restore: bool = False,
+    sharpen: float = 0.0,
+    restore: str | None = None,
     progress: Callable[[float, str], None] | None = None,
     should_cancel: Callable[[], None] | None = None,
 ) -> tuple[object, dict]:
@@ -794,6 +856,10 @@ def upscale_image(
             各调用一次，被取消时它应抛出 ``TaskCancelled``；
             这样首次运行时漫长的模型下载/加载也能被取消。
             真正的推理是一次不可打断的库调用，故单张图片只能在推理前响应取消。
+        sharpen: 0~1 的清晰度增强强度（超分后的 CAS 锐化），默认 0 不处理。
+            模糊的老照片建议 0.3~0.5。
+        restore: 前置复原模型 key（``config.RESTORE_MODELS``，如 ``"jpeg"``）。
+            在**输入分辨率**上去压缩块/去噪，不改变尺寸；None 表示不复原。
 
     Returns:
         ``(result_rgb, info)``，info 含耗时、输入输出尺寸、模型与 LoRA 信息。
@@ -807,6 +873,23 @@ def upscale_image(
         should_cancel()
     if progress:
         progress(0.01, "准备中…")
+
+    # 前置复原（可选）：在输入分辨率上去压缩块 / 去噪，不改变尺寸。
+    # 放在超分之前，是因为「先复原再放大」比「放大后再补救」信息损失更小。
+    restore_key = config.parse_restore_choice(restore) if restore else None
+    if restore_key:
+        from src import restore as restore_mod
+
+        if progress:
+            progress(0.02, f"前置复原：{restore_mod.restore_label(restore_key)}…")
+        image_rgb = restore_mod.restore_image(
+            image_rgb,
+            restore_key,
+            device=device,
+            half=config.HALF_PRECISION if half is None else bool(half),
+            progress=lambda value, text: progress(0.02 + value * 0.06, text) if progress else None,
+            should_cancel=should_cancel,
+        )
 
     engine = get_engine().load(
         model_name=model_name,
@@ -837,6 +920,7 @@ def upscale_image(
         face_restore=face_restore,
         face_restorer=face_restorer,
         should_cancel=should_cancel,
+        sharpen=sharpen,
     )
     if progress:
         progress(1.0, "完成")
@@ -850,6 +934,12 @@ def upscale_image(
         "lora": Path(engine.lora_name).name if engine.lora_name else "不使用 LoRA",
         "device": device,
         "free_vram_gb": get_free_vram_gb(config.gpu_index_from_option(device)),
+        "sharpen": round(float(sharpen or 0.0), 2),
+        "restore": restore_key or "",
+        "face_restore": (
+            (face_restorer.last_status if face_restorer is not None else "未启用")
+            if face_restore else "未启用"
+        ),
     }
     logger.info(
         "图片超分完成：%s -> %s，耗时 %.2fs（模型=%s，LoRA=%s）",
