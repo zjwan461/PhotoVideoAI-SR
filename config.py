@@ -470,9 +470,15 @@ def ffmpeg_diagnosis() -> str:
 
 
 def maxine_available() -> bool:
-    """检测 NVIDIA Maxine VSR（nvvfx）是否可用。"""
+    """检测 NVIDIA Maxine VSR（nvvfx）是否**真正可用**。
+
+    不能只看 ``import nvvfx``：conda 卸载后 ``site-packages`` 里可能残留空的
+    ``nvvfx/`` 目录，它会被当作命名空间包导入成功，于是 UI 显示「Maxine 可用」、
+    点下去才报 ``module 'nvvfx' has no attribute 'VideoSuperRes'``（本机真实踩过）。
+    这里要求 API 真实存在。
+    """
     try:
-        import nvvfx  # noqa: F401
+        from nvvfx import VideoSuperRes  # noqa: F401
     except Exception:
         return False
     return True

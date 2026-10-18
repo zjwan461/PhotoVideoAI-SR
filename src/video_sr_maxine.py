@@ -38,6 +38,14 @@ logger = get_logger("maxine")
 try:  # pragma: no cover - 依赖运行环境
     import nvvfx
 
+    # 只 import 成功还不够：conda 卸载后 site-packages 里可能残留空的 nvvfx/
+    # 目录，会被当作命名空间包导入成功，直到真正调用才报
+    # ``module 'nvvfx' has no attribute 'VideoSuperRes'``。
+    if not hasattr(nvvfx, "VideoSuperRes"):
+        raise ImportError(
+            "已安装的 nvvfx 缺少 VideoSuperRes（可能是残留目录或版本不匹配，"
+            "请用 python scripts/install.py --maxine 重装）"
+        )
     HAS_MAXINE = True
     MAXINE_IMPORT_ERROR = ""
 except Exception as exc:  # noqa: BLE001

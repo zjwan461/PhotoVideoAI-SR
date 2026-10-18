@@ -87,6 +87,12 @@ def test_config_and_common() -> None:
           not (default_args.maxine or default_args.gfpgan or default_args.restore))
     check("--skip-ffmpeg 可关闭 FFmpeg 下载", installer.parse_args(["--skip-ffmpeg"]).skip_ffmpeg)
 
+    # Maxine 的「已安装」判断必须校验 API，不能只看 import（残留空目录会误判）
+    maxine_cmd = installer.maxine_check_command()
+    check("Maxine 判断要求 VideoSuperRes 存在",
+          "VideoSuperRes" in maxine_cmd and "import nvvfx" not in maxine_cmd,
+          maxine_cmd)
+
     # 安装脚本里的 FFmpeg 步骤：强制「未安装」时应当给出下载源（不真的下载）
     import contextlib
     import io

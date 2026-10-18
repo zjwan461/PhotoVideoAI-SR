@@ -199,8 +199,8 @@ python scripts/install.py --dry-run      # 只打印将要执行的命令
 
 ```bash
 # 4.1 先装 CUDA 版 PyTorch（不要用默认源，Windows 上是 CPU 版）
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-# 国内镜像：--index-url https://mirror.sjtu.edu.cn/pytorch-wheels/cu126
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+# 国内镜像：--index-url https://mirror.sjtu.edu.cn/pytorch-wheels/cu130
 
 # 4.2 核心依赖（本文件可被普通 pip 安装，不含 torch / basicsr / realesrgan）
 pip install -r requirements.txt

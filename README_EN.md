@@ -200,8 +200,8 @@ python scripts/install.py --dry-run      # only print the commands that would be
 
 ```bash
 # 4.1 Install the CUDA build of PyTorch first (do not use the default index; on Windows it is the CPU build)
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-# Mirror in mainland China: --index-url https://mirror.sjtu.edu.cn/pytorch-wheels/cu126
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+# Mirror in mainland China: --index-url https://mirror.sjtu.edu.cn/pytorch-wheels/cu130
 
 # 4.2 Core dependencies (this file installs with plain pip; it does not include torch / basicsr / realesrgan)
 pip install -r requirements.txt

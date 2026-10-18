@@ -13,7 +13,7 @@
 
 用法::
 
-    python scripts/install.py                 # PyTorch cu126（官方源）
+    python scripts/install.py                 # PyTorch cu130（官方源）
     python scripts/install.py --mirror cn     # 国内镜像（PyPI 清华 + PyTorch SJTU）
     python scripts/install.py --skip-torch    # 已装好 CUDA 版 PyTorch，只补其余依赖
     python scripts/install.py --cpu           # 装 CPU 版 PyTorch（仅用于看界面调试）
@@ -40,10 +40,10 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-#: PyTorch 官方 CUDA 轮子索引（cu126 与当前主流驱动兼容）
-TORCH_INDEX_OFFICIAL = "https://download.pytorch.org/whl/cu126"
+#: PyTorch 官方 CUDA 轮子索引（cu130 与当前主流驱动兼容）
+TORCH_INDEX_OFFICIAL = "https://download.pytorch.org/whl/cu130"
 #: 国内镜像（实测比官方源快一个数量级以上）
-TORCH_INDEX_CN = "https://mirror.sjtu.edu.cn/pytorch-wheels/cu126"
+TORCH_INDEX_CN = "https://mirror.sjtu.edu.cn/pytorch-wheels/cu130"
 TORCH_INDEX_CPU = "https://download.pytorch.org/whl/cpu"
 #: 国内 PyPI 镜像
 PYPI_CN = "https://pypi.tuna.tsinghua.edu.cn/simple"
@@ -246,17 +246,35 @@ def install_super_resolution(args: argparse.Namespace) -> bool:
     return True
 
 
+def maxine_check_command() -> str:
+    """判断 nvidia-vfx 是否**真正可用**的子进程代码。
+
+    必须校验 ``VideoSuperRes`` 存在，不能只 ``import nvvfx``：
+    卸载后残留的空目录会被当作命名空间包导入成功。
+    """
+    return "from nvvfx import VideoSuperRes; print('ok')"
+
+
 def install_maxine(args: argparse.Namespace) -> bool:
     """安装 NVIDIA Maxine VSR（``nvidia-vfx``，可选闭源组件）。
 
-    只在显式传入 ``--maxine`` 时执行：wheel 约 400 MB，且对显卡/驱动有要求。
+    只在显式传入 ``--maxine``（或 ``--all``）时执行：wheel 约 400 MB，且对显卡/驱动有要求。
     """
     section("安装 Maxine VSR（可选，闭源组件）")
 
-    ok, _ = python_check("import nvvfx")
-    if ok:
-        print("  ✅ 已安装 nvidia-vfx（nvvfx 可导入），跳过。")
+    # 注意：不能只判断 `import nvvfx`。卸载后 site-packages 里可能残留一个
+    # 空的 nvvfx/ 目录，会被当成命名空间包导入成功，于是这里误判「已安装」
+    # 直接跳过——用户以为装上了，实际用的时候才报
+    # ``module 'nvvfx' has no attribute 'VideoSuperRes'``。
+    has_api, _ = python_check(maxine_check_command())
+    if has_api:
+        print("  ✅ 已安装 nvidia-vfx（VideoSuperRes 可用），跳过。")
         return True
+
+    importable, _ = python_check("import nvvfx; print(getattr(nvvfx, '__file__', ''))")
+    if importable:
+        print("  ⚠️ 检测到 nvvfx 残留（可导入但缺少 VideoSuperRes），通常是"
+              "卸载没清理干净；下面会重新安装覆盖。")
 
     index = args.maxine_index or MAXINE_INDEX
     print("  说明：这是 NVIDIA 闭源组件，不支持 LoRA；装好后视频 Tab 会多出 Maxine 选项。")
@@ -710,7 +728,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mirror", choices=["none", "cn"], default="none",
                         help="cn = 使用国内镜像（PyPI 清华 + PyTorch SJTU）")
     parser.add_argument("--torch-index", default=None,
-                        help="自定义 PyTorch 轮子索引（默认 cu126）")
+                        help="自定义 PyTorch 轮子索引（默认 cu130）")
     parser.add_argument("--skip-torch", action="store_true",
                         help="跳过 PyTorch 安装（已装好 CUDA 版时使用）")
     parser.add_argument("--skip-ffmpeg", action="store_true",
